@@ -1,0 +1,145 @@
+# irondict — Project Plan
+
+## Context
+
+`irondict` is a multi-dictionary lookup app written in Rust, exposed through both
+a **CLI** and a **GUI**. It ships a few preinstalled dictionaries but is mostly
+driven by **user-provided StarDict files**. Lookups must support not just exact
+matches but **fuzzy (typo-tolerant) and full-text** search across definitions.
+We implement this feature-by-feature; each phase is independently runnable/testable.
+
+## Decisions
+
+- **Data:** preinstalled + mostly user-provided dictionaries. The **first
+  preinstalled dictionary is GCIDE** — the GNU Collaborative International
+  Dictionary of English (based on Webster's Revised Unabridged 1913 + WordNet
+  supplements). A monolingual English dictionary, available in StarDict form.
+  Note: GCIDE is distributed under the **GPLv3** — relevant for bundling/redistribution.
+- **Format:** StarDict (`.ifo` / `.idx` / `.dict`(`.dz`)).
+- **Scope:** multi-dictionary, user can manage/switch/aggregate across them.
+- **Matching:** fuzzy + full-text (and exact/prefix as the simpler subset).
+- **Structure:** Cargo workspace (core lib + cli bin + gui bin).
+- **GUI framework:** **Slint** — chosen for the highest visual polish for the least
+  effort (modern look + fast boot were the priorities). UI is written in `.slint`
+  declarative markup with built-in Material/Fluent styling and animations; Rust
+  provides the glue via properties + callbacks. `iced` is the fallback if we ever
+  want to stay 100% Rust with no markup language.
+- **Project license: GPLv3** (`GPL-3.0-or-later`, set in `Cargo.toml`). This is
+  compatible with bundling GCIDE (GPLv3) and using Slint under its GPLv3 option,
+  so the whole stack is consistent. A full `LICENSE` (GPLv3 text) file is added in
+  Phase 0.
+- **Slint license:** tri-licensed; since the project is GPLv3 we use Slint under its
+  **GPLv3** option (no paid license needed for desktop).
+
+## Architecture
+
+Cargo **workspace** with three crates under `crates/`:
+
+```
+irondict/
+├── Cargo.toml            # [workspace] members
+└── crates/
+    ├── core/   (irondict-core)  # library: model, StarDict loader, manager, search
+    ├── cli/    (irondict-cli)   # binary: clap-based CLI front-end
+    └── gui/    (irondict-gui)   # binary: Slint front-end (ui.slint + main.rs)
+```
+
+Both front-ends depend only on `irondict-core`, which owns all dictionary logic
+(matches the `CLAUDE.md` convention: keep CLI/GUI separate from the core lookup
+so both share the same backend).
+
+### Core domain model (`crates/core/src`)
+
+- `Entry { headword: String, definition: Definition }` where `Definition` keeps
+  the StarDict data type (plain text / HTML / etc.) so the GUI can render richly.
+- `Dictionary` — one loaded dictionary: metadata (name, language pair, word count)
+  + lookup over its entries.
+- `DictionaryManager` — owns multiple `Dictionary` instances; aggregates searches
+  across the enabled ones; add/remove/enable.
+- `Config` — persisted list of dictionary paths + enabled state, stored in the OS
+  app-data dir via the `directories` crate.
+- `SearchEngine` — exact, prefix, fuzzy, and full-text queries (see Phase 4).
+
+### Key crates
+
+- StarDict parsing: **`stardict`** (most maintained, actively updated).
+- Full-text + fuzzy: **`tantivy`** (`FuzzyTermQuery` for typo tolerance up to edit
+  distance 2; BM25 full-text over headwords + definitions).
+- Config/paths: `directories`, `serde` + `serde_json` (or `toml`).
+- Errors: `thiserror` (lib) / `anyhow` (binaries).
+- CLI: `clap` (derive). GUI: `slint` (+ `slint-build` for compiling `.slint`).
+
+## Build order (one phase at a time)
+
+- [ ] **Phase 0 — Workspace scaffold.** Convert the single crate into a workspace;
+  create empty `irondict-core`, `irondict-cli`, `irondict-gui`. App compiles & runs
+  stub binaries. Add the GPLv3 `LICENSE` file (done) and `Cargo.toml` license field
+  (done). Update `CLAUDE.md` with the crate layout.
+
+- [ ] **Phase 1 — Core model + StarDict loading.** Define
+  `Entry`/`Definition`/`Dictionary`; load a StarDict file via the `stardict` crate;
+  exact-match lookup. Unit tests with a small sample dictionary committed as a fixture.
+
+- [ ] **Phase 2 — Acquire & convert GCIDE to StarDict.** Source the GCIDE data and
+  produce a StarDict-format dictionary (`.ifo`/`.idx`/`.dict.dz`):
+  - Preferred: locate a ready-made GCIDE StarDict build (dictd/StarDict community
+    distributions) and verify its integrity + GPLv3 provenance.
+  - Fallback: fetch GCIDE source from GNU (`ftp.gnu.org/gnu/gcide`) and convert via
+    the dictd toolchain (`dictfmt`/`dictzip`) then `stardict-tools` (`dictd2dic` /
+    `tabfile`) to StarDict.
+  - Verify the result loads through the Phase 1 loader (assert a known headword).
+  - Decide bundling strategy: commit to repo vs. download-on-first-run (note size +
+    GPLv3 redistribution). Document the conversion steps in `docs/`.
+
+- [ ] **Phase 3 — Dictionary manager + config.** `DictionaryManager` over multiple
+  dicts; persisted `Config` in the app-data dir; add/remove/enable; load preinstalled
+  (GCIDE) + user dictionaries on startup.
+
+- [ ] **Phase 4 — CLI front-end.** `clap` commands: `lookup <word>`, `add <path>`,
+  `list`, `remove <name>`, `search <query>`. Aggregates results across enabled
+  dictionaries, prints source dictionary per result. First end-to-end usable build.
+
+- [ ] **Phase 5 — Search engine (prefix → fuzzy → full-text).** Build a `tantivy`
+  index over headwords + definitions, cached in the app-data dir and rebuilt when a
+  dictionary is added. Expose exact, prefix/autocomplete, fuzzy, and full-text query
+  modes through `SearchEngine`; wire into the CLI `search` command.
+
+- [ ] **Phase 6 — GUI front-end (Slint).** `ui.slint` markup defines a
+  search-as-you-type box → results list → definition pane, plus a dictionary
+  management panel (add/remove/enable, show counts). `main.rs` wires Slint
+  properties/callbacks to `DictionaryManager` + `SearchEngine`. A `build.rs` compiles
+  the `.slint` via `slint-build`. Use a built-in style (Fluent/Material) for a modern
+  look out of the box.
+
+- [ ] **Phase 7 — Polish.** Rich definition rendering (HTML/markup data types,
+  including GCIDE's markup), search history, settings, packaging of GCIDE.
+
+## Critical files (to be created)
+
+- `Cargo.toml` (root) — convert to `[workspace]`.
+- `crates/core/src/{lib.rs, model.rs, stardict.rs, manager.rs, config.rs, search.rs}`
+- `crates/cli/src/main.rs` — `clap` CLI.
+- `crates/gui/` — `ui/ui.slint` (markup), `src/main.rs` (glue), `build.rs` (slint-build).
+- `crates/core/tests/` + a small StarDict fixture for tests.
+
+## Verification
+
+- **Per phase:** `cargo test`, `cargo clippy`, `cargo fmt --check`.
+- **Phase 1:** unit test loads the fixture dictionary and asserts a known
+  headword → definition.
+- **Phase 2:** the converted GCIDE StarDict loads through the Phase 1 loader and a
+  known headword (e.g. "dictionary") resolves to its definition.
+- **Phase 4:** `cargo run -p irondict-cli -- add <fixture>` then
+  `cargo run -p irondict-cli -- lookup <word>` returns the expected entry.
+- **Phase 5:** CLI `search` returns fuzzy hits for a misspelled query and full-text
+  hits for a word appearing only inside a definition.
+- **Phase 6:** `cargo run -p irondict-gui` — type a prefix, see live results, click an
+  entry, see its definition; add/remove a dictionary from the UI.
+
+## Open questions (can defer)
+
+- GCIDE bundling strategy (commit in-repo vs. download on first run) — decided in
+  Phase 2 based on file size and GPLv3 redistribution.
+- Config format: JSON vs TOML (lean TOML for human-editability).
+- Verify the `stardict` crate's license on crates.io before depending on it
+  (the GUI/search crates are MIT/Apache; Slint is royalty-free for desktop).
