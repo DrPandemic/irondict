@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
 use tantivy::collector::TopDocs;
-use tantivy::query::{FuzzyTermQuery, Query, QueryParser, RegexQuery, TermQuery};
+use tantivy::query::{
+    BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, Query, QueryParser, RegexQuery, TermQuery,
+};
 use tantivy::schema::{Field, IndexRecordOption, Schema, Value, STORED, STRING, TEXT};
 use tantivy::{doc, Index, IndexReader, Term};
 
@@ -157,6 +159,11 @@ impl SearchEngine {
         if query.is_empty() {
             return Ok(Vec::new());
         }
+        // Fuzzy retrieval needs its own over-fetch + re-rank, so it bypasses the
+        // generic single-query path below.
+        if mode == SearchMode::Fuzzy {
+            return self.fuzzy_search(query, limit);
+        }
         let parsed: Box<dyn Query> = match mode {
             SearchMode::Exact => {
                 let term = Term::from_field_text(self.fields.key, &query.to_lowercase());
@@ -166,10 +173,7 @@ impl SearchEngine {
                 let pattern = format!("{}.*", regex_escape(&query.to_lowercase()));
                 Box::new(RegexQuery::from_pattern(&pattern, self.fields.key).map_err(map_err)?)
             }
-            SearchMode::Fuzzy => {
-                let term = Term::from_field_text(self.fields.key, &query.to_lowercase());
-                Box::new(FuzzyTermQuery::new(term, 2, true))
-            }
+            SearchMode::Fuzzy => unreachable!("handled above"),
             SearchMode::FullText => {
                 let parser = QueryParser::for_index(
                     &self.index,
@@ -198,6 +202,93 @@ impl SearchEngine {
         }
         Ok(hits)
     }
+
+    /// Typo-tolerant headword search, ranked by actual edit distance.
+    ///
+    /// tantivy's [`FuzzyTermQuery`] is constant-scored (every match scores the
+    /// same), so on its own the top-N would be an arbitrary slice of all matches
+    /// — a perfect match can fall outside the limit. To avoid that we:
+    ///
+    /// 1. cap the allowed edit distance by query length, so short, ambiguous
+    ///    queries don't match a large fraction of the dictionary (length guard);
+    /// 2. stack an exact + distance-1 + distance-2 query with widely separated
+    ///    boosts, so closer matches both *retrieve* first and rank first;
+    /// 3. over-fetch and re-rank in Rust by true Levenshtein distance, with a
+    ///    first-character anchor as a prefix guard and stable tie-breaks.
+    fn fuzzy_search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, Error> {
+        let lower = query.to_lowercase();
+        let len = lower.chars().count();
+        // Mild length guard: a single character is too ambiguous to fuzz, but
+        // anything longer is allowed the full distance-2 budget. Ranking by true
+        // edit distance (below) keeps the closest matches on top regardless.
+        let max_distance: u8 = if len <= 1 { 0 } else { 2 };
+
+        let exact = Term::from_field_text(self.fields.key, &lower);
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(
+            Occur::Should,
+            Box::new(BoostQuery::new(
+                Box::new(TermQuery::new(exact.clone(), IndexRecordOption::Basic)),
+                1_000_000.0,
+            )),
+        )];
+        if max_distance >= 1 {
+            clauses.push((
+                Occur::Should,
+                Box::new(BoostQuery::new(
+                    Box::new(FuzzyTermQuery::new(exact.clone(), 1, true)),
+                    1_000.0,
+                )),
+            ));
+        }
+        if max_distance >= 2 {
+            clauses.push((
+                Occur::Should,
+                Box::new(BoostQuery::new(
+                    Box::new(FuzzyTermQuery::new(exact, 2, true)),
+                    1.0,
+                )),
+            ));
+        }
+        let query = BooleanQuery::new(clauses);
+
+        // Over-fetch so the Rust re-rank has room to find the closest matches
+        // even when there are many equally-scored fuzzy candidates.
+        let fetch = limit.saturating_mul(4).max(64);
+        let searcher = self.reader.searcher();
+        let docs = searcher
+            .search(&query, &TopDocs::with_limit(fetch).order_by_score())
+            .map_err(map_err)?;
+
+        let first = lower.chars().next();
+        let mut scored: Vec<(usize, usize, SearchHit)> = Vec::with_capacity(docs.len());
+        for (_score, addr) in docs {
+            let doc: tantivy::TantivyDocument = searcher.doc(addr).map_err(map_err)?;
+            let headword = stored_text(&doc, self.fields.headword);
+            let hw_lower = headword.to_lowercase();
+            // Prefix guard: keep only candidates sharing the query's first
+            // character — legitimate typo corrections rarely change it.
+            if hw_lower.chars().next() != first {
+                continue;
+            }
+            let distance = levenshtein(&lower, &hw_lower);
+            let hit = SearchHit {
+                dictionary: stored_text(&doc, self.fields.dictionary),
+                headword,
+                // A distance-based score so closer matches read as more relevant.
+                score: 1.0 / (1.0 + distance as f32),
+            };
+            scored.push((distance, hw_lower.chars().count(), hit));
+        }
+        // Closest first, then shorter headwords, then alphabetical for stability.
+        scored.sort_by(|a, b| {
+            a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then_with(|| {
+                a.2.headword
+                    .to_lowercase()
+                    .cmp(&b.2.headword.to_lowercase())
+            })
+        });
+        Ok(scored.into_iter().take(limit).map(|(_, _, h)| h).collect())
+    }
 }
 
 fn stored_text(doc: &tantivy::TantivyDocument, field: Field) -> String {
@@ -205,6 +296,27 @@ fn stored_text(doc: &tantivy::TantivyDocument, field: Field) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string()
+}
+
+/// Levenshtein edit distance between two strings (insert/delete/substitute, no
+/// transposition discount). Operates on `char`s so it is Unicode-correct.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 /// Escape regex metacharacters so a literal prefix can be used in a
@@ -221,4 +333,26 @@ fn regex_escape(s: &str) -> String {
         out.push(c);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::levenshtein;
+
+    #[test]
+    fn levenshtein_basics() {
+        assert_eq!(levenshtein("hello", "hello"), 0);
+        assert_eq!(levenshtein("helo", "hello"), 1); // insertion
+        assert_eq!(levenshtein("hallo", "hello"), 1); // substitution
+        assert_eq!(levenshtein("hell", "hello"), 1); // deletion
+        assert_eq!(levenshtein("ba", "baba"), 2);
+        assert_eq!(levenshtein("", "abc"), 3);
+        assert_eq!(levenshtein("abc", ""), 3);
+    }
+
+    #[test]
+    fn levenshtein_is_unicode_aware() {
+        // Counts characters, not bytes: "é" is multi-byte but one char.
+        assert_eq!(levenshtein("café", "cafe"), 1);
+    }
 }

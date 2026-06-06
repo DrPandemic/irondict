@@ -56,6 +56,44 @@ fn fuzzy_match_tolerates_a_typo() {
 }
 
 #[test]
+fn fuzzy_exact_match_ranks_first_with_top_score() {
+    let (_dir, engine) = engine_over_mini();
+    // An exact match must rank first and read as a perfect (distance-0) score,
+    // even though tantivy's fuzzy query scores every candidate identically.
+    let hits = engine.search("hello", SearchMode::Fuzzy, 10).unwrap();
+    assert_eq!(hits[0].headword, "hello");
+    assert!((hits[0].score - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn fuzzy_short_query_still_finds_close_completion() {
+    let (_dir, engine) = engine_over_mini();
+    // A short query like "ca" still reaches "cat" (within distance 2); the only
+    // hard guard is on single characters.
+    let hits = engine.search("ca", SearchMode::Fuzzy, 10).unwrap();
+    let words: Vec<&str> = hits.iter().map(|h| h.headword.as_str()).collect();
+    assert!(words.contains(&"cat"));
+}
+
+#[test]
+fn fuzzy_single_char_is_exact_only() {
+    let (_dir, engine) = engine_over_mini();
+    // A lone character is too ambiguous to fuzz, so it only matches exactly
+    // (nothing in the fixture is a single character).
+    let hits = engine.search("c", SearchMode::Fuzzy, 10).unwrap();
+    assert!(hits.iter().all(|h| h.headword != "cat"));
+}
+
+#[test]
+fn fuzzy_prefix_guard_rejects_first_char_change() {
+    let (_dir, engine) = engine_over_mini();
+    // "jello" is one edit from "hello" but changes the first character, which the
+    // prefix guard rejects.
+    let hits = engine.search("jello", SearchMode::Fuzzy, 10).unwrap();
+    assert!(hits.iter().all(|h| h.headword != "hello"));
+}
+
+#[test]
 fn full_text_finds_word_inside_a_definition() {
     let (_dir, engine) = engine_over_mini();
     // "furry" appears only in the definition of "cat" ("a furry animal").
