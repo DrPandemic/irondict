@@ -166,8 +166,47 @@ so both share the same backend).
   search-as-you-type box → results list → definition pane, plus a dictionary
   management panel (add/remove/enable, show counts). `main.rs` wires Slint
   properties/callbacks to `DictionaryManager` + `SearchEngine`. A `build.rs` compiles
-  the `.slint` via `slint-build`. Use a built-in style (Fluent/Material) for a modern
-  look out of the box.
+  the `.slint` via `slint-build`.
+
+  **Agreed design ("toolbar layout") — decided in look-and-feel discussion:**
+  - **Framework:** Slint 1.x under its **GPLv3** option. Do **not** describe the
+    design as "Mac"/"Apple"; call it the "toolbar layout" (see memory
+    `gui-naming-no-vendor`).
+  - **Layout:** top toolbar with an inline `( All · GCIDE )` **segmented scope**
+    selector on the **left** and a **search field** on the **right** — **no**
+    back/forward history arrows. Body below = a **narrow results column** (shown only
+    while searching) + a **definition pane** as the hero/main area.
+  - **Empty state:** "Word of the moment" — a **random entry** rendered full in the
+    definition pane.
+  - **Results:** **card rows** showing the **headword + a greyed one-line snippet**
+    (not a flat text list). Selected card = **tinted background + accent left bar**.
+  - **Source tag:** a small **colored pill** (e.g. `❲ GCIDE ❳`), not a `── GCIDE`
+    footer.
+  - **Typography:** **IBM Plex Sans** (SIL OFL), bundled in `crates/gui/assets/`
+    (variable font). Scale: headword ~28 semibold · part-of-speech/pron ~13 grey ·
+    body ~16 / 1.5 line-height · result title ~14 medium · snippet ~12 grey ·
+    pill ~11 medium. Modern sans throughout (no serif).
+  - **Theme:** **light by default**; follow the OS light/dark preference live when the
+    XDG portal reports one.
+  - **Accent color:** blend with the OS. Detect via **`zbus`** in this order, first
+    hit wins: XDG portal `org.freedesktop.appearance.accent-color` → GNOME
+    `gsettings` → KDE `kdeglobals` → **fallback indigo `#4F46E5`**. Must be
+    **blazing fast**: apply a **cached** value (or indigo on first run) for instant
+    first paint, then refresh **async** off the UI thread and update a reactive Slint
+    accent property; subscribe to the portal `SettingChanged` signal so OS
+    accent/theme changes apply live. (Dev box is **sway**, which exposes no portal
+    accent and `color-scheme = no preference`, so it lands on indigo + light.)
+  - **Accent is used for:** selected result (tint + left bar), the source pill, the
+    "word of the moment" label, the search focus ring, and links. Everything else is
+    greyscale.
+  - **Build order:** (1) static interactive visual prototype with sample data to
+    validate the look ("try 1"), then (2) wire `DictionaryManager` + `SearchEngine`
+    (live search-as-you-type) and (3) the OS accent/theme detection, then the
+    dictionary-management panel.
+
+  Pinned versions at design time: `slint` resolves to **1.16.1**. IBM Plex Sans TTFs
+  live under the IBM/plex repo (note: not at `…/fonts/complete/ttf/` on `master` —
+  that path 404s; find the current path when bundling).
 
 - [ ] **Phase 7 — Polish.** Rich definition rendering (HTML/markup data types,
   including GCIDE's markup), search history, settings, packaging of GCIDE.
