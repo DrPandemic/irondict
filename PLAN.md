@@ -14,7 +14,9 @@ We implement this feature-by-feature; each phase is independently runnable/testa
   preinstalled dictionary is GCIDE** — the GNU Collaborative International
   Dictionary of English (based on Webster's Revised Unabridged 1913 + WordNet
   supplements). A monolingual English dictionary, available in StarDict form.
-  Note: GCIDE is distributed under the **GPLv3** — relevant for bundling/redistribution.
+  Note: the bundled GCIDE build (v0.44) is **GPL-2.0-or-later** (verified in Phase 2,
+  see `docs/gcide.md`); newer GNU gcide 0.51+ is GPLv3. Either way it is "or-later",
+  so it redistributes cleanly inside this GPL-3.0-or-later project.
 - **Format:** StarDict (`.ifo` / `.idx` / `.dict`(`.dz`)).
 - **Scope:** multi-dictionary, user can manage/switch/aggregate across them.
 - **Matching:** fuzzy + full-text (and exact/prefix as the simpler subset).
@@ -80,16 +82,20 @@ so both share the same backend).
   `Entry`/`Definition`/`Dictionary`; load a StarDict file via the `stardict` crate;
   exact-match lookup. Unit tests with a small sample dictionary committed as a fixture.
 
-- [ ] **Phase 2 — Acquire & convert GCIDE to StarDict.** Source the GCIDE data and
-  produce a StarDict-format dictionary (`.ifo`/`.idx`/`.dict.dz`):
-  - Preferred: locate a ready-made GCIDE StarDict build (dictd/StarDict community
-    distributions) and verify its integrity + GPLv3 provenance.
-  - Fallback: fetch GCIDE source from GNU (`ftp.gnu.org/gnu/gcide`) and convert via
-    the dictd toolchain (`dictfmt`/`dictzip`) then `stardict-tools` (`dictd2dic` /
-    `tabfile`) to StarDict.
-  - Verify the result loads through the Phase 1 loader (assert a known headword).
-  - Decide bundling strategy: commit to repo vs. download-on-first-run (note size +
-    GPLv3 redistribution). Document the conversion steps in `docs/`.
+- [x] **Phase 2 — Acquire & convert GCIDE to StarDict.** Sourced a ready-made GCIDE
+  StarDict build (`dictd_www.dict.org_gcide`, v0.44) from the StarDict community
+  mirror (`download.huzheng.org`) and committed it under
+  `crates/core/assets/gcide/`. Verified it loads through the Phase 1 loader
+  (`crates/core/tests/gcide_test.rs`: bookname, wordcount 174222, and the headword
+  `dictionary` resolve). Full provenance, SHA-256, license, and the GNU-source
+  fallback-conversion steps are documented in `docs/gcide.md`.
+  - **License finding:** the bundled GCIDE data is **GPL-2.0-or-later** (not GPLv3 as
+    assumed below); the embedded notice says "version 2, or (at your option) any later
+    version" with "No additional restrictions are claimed." GPL-2.0-or-later content
+    redistributes cleanly inside this GPL-3.0-or-later project. (Newer GNU gcide 0.51+
+    is GPLv3.)
+  - **Bundling strategy decided:** commit the StarDict trio into the repo (offline,
+    reproducible) rather than download-on-first-run.
 
 - [ ] **Phase 3 — Dictionary manager + config.** `DictionaryManager` over multiple
   dicts; persisted `Config` in the app-data dir; add/remove/enable; load preinstalled
