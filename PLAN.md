@@ -76,7 +76,7 @@ so both share the same backend).
   stub binaries. Add the GPLv3 `LICENSE` file (done) and `Cargo.toml` license field
   (done). Update `CLAUDE.md` with the crate layout.
 
-- [ ] **Phase 1 — Core model + StarDict loading.** Define
+- [x] **Phase 1 — Core model + StarDict loading.** Define
   `Entry`/`Definition`/`Dictionary`; load a StarDict file via the `stardict` crate;
   exact-match lookup. Unit tests with a small sample dictionary committed as a fixture.
 

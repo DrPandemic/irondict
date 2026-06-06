@@ -1,13 +1,12 @@
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+pub mod model;
+pub mod stardict;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("StarDict error: {0}")]
+    Stardict(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn version_returns_semver() {
-        assert!(!version().is_empty());
-    }
+pub fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
 }
