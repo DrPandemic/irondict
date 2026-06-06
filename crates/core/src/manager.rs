@@ -146,6 +146,17 @@ impl DictionaryManager {
         Ok(results)
     }
 
+    /// Visit every entry of every enabled dictionary, calling `f` with the
+    /// source dictionary's name and the entry. Used to populate the search
+    /// index (Phase 5).
+    pub fn for_each_enabled_entry(&mut self, mut f: impl FnMut(&str, Entry)) -> Result<(), Error> {
+        for d in self.dicts.iter_mut().filter(|d| d.enabled) {
+            let name = d.dictionary.info.name.clone();
+            d.dictionary.for_each_entry(|entry| f(&name, entry))?;
+        }
+        Ok(())
+    }
+
     /// Snapshot the current set of dictionaries as a persistable [`Config`].
     pub fn config(&self) -> Config {
         Config {

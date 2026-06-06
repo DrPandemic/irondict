@@ -1,9 +1,12 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
-use irondict_core::{bundled_gcide_path, Config, DictionaryConfig, DictionaryManager};
+use irondict_core::{
+    bundled_gcide_path, search, Config, DictionaryConfig, DictionaryManager, SearchEngine,
+    SearchMode,
+};
 
 /// Multi-dictionary lookup over StarDict dictionaries.
 #[derive(Parser)]
@@ -19,6 +22,17 @@ enum Command {
     Lookup {
         /// The word to look up.
         word: String,
+    },
+    /// Search the index across all enabled dictionaries.
+    Search {
+        /// The query to search for.
+        query: String,
+        /// How to match the query.
+        #[arg(long, value_enum, default_value_t = Mode::FullText)]
+        mode: Mode,
+        /// Maximum number of results to return.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
     },
     /// Add a StarDict dictionary (path to its `.ifo` file).
     Add {
@@ -44,10 +58,35 @@ enum Command {
     },
 }
 
+/// CLI mirror of [`SearchMode`].
+#[derive(Clone, Copy, ValueEnum)]
+enum Mode {
+    /// Exact (case-insensitive) headword match.
+    Exact,
+    /// Headword starts with the query.
+    Prefix,
+    /// Typo-tolerant headword match.
+    Fuzzy,
+    /// Free-text match across headwords and definitions.
+    FullText,
+}
+
+impl From<Mode> for SearchMode {
+    fn from(mode: Mode) -> Self {
+        match mode {
+            Mode::Exact => SearchMode::Exact,
+            Mode::Prefix => SearchMode::Prefix,
+            Mode::Fuzzy => SearchMode::Fuzzy,
+            Mode::FullText => SearchMode::FullText,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Lookup { word } => lookup(&word),
+        Command::Search { query, mode, limit } => run_search(&query, mode.into(), limit),
         Command::Add { path } => add(path),
         Command::List => list(),
         Command::Remove { name } => remove(&name),
@@ -102,6 +141,66 @@ fn lookup(word: &str) -> Result<()> {
             println!("{}", definition.trim_end());
             println!();
         }
+    }
+    Ok(())
+}
+
+/// The signature of the enabled dictionary set, written next to the index so we
+/// know whether the cached index is still current. Changing which dictionaries
+/// are enabled (or their word counts) invalidates the cache and forces a rebuild.
+fn index_signature(manager: &DictionaryManager) -> String {
+    let mut lines: Vec<String> = manager
+        .dictionaries()
+        .iter()
+        .filter(|d| d.enabled)
+        .map(|d| {
+            format!(
+                "{}|{}|{}",
+                d.name(),
+                d.path.display(),
+                d.dictionary.info.word_count
+            )
+        })
+        .collect();
+    lines.sort();
+    lines.join("\n")
+}
+
+/// Open the cached search index if it matches the current dictionary set,
+/// otherwise (re)build it. The index lives under the OS cache dir.
+fn build_or_open_index(manager: &mut DictionaryManager) -> Result<SearchEngine> {
+    let dir = search::default_index_dir().context("locating index directory")?;
+    let manifest = dir.join("manifest");
+    let signature = index_signature(manager);
+
+    let cached = std::fs::read_to_string(&manifest).ok();
+    if cached.as_deref() == Some(signature.as_str()) {
+        if let Ok(engine) = SearchEngine::open(&dir) {
+            return Ok(engine);
+        }
+    }
+
+    eprintln!("Building search index...");
+    let engine = SearchEngine::build(&dir, manager).context("building search index")?;
+    std::fs::write(&manifest, &signature).context("writing index manifest")?;
+    Ok(engine)
+}
+
+fn run_search(query: &str, mode: SearchMode, limit: usize) -> Result<()> {
+    let mut manager = load_manager()?;
+    let engine = build_or_open_index(&mut manager)?;
+    let hits = engine.search(query, mode, limit).context("searching")?;
+
+    if hits.is_empty() {
+        println!("No results for \"{query}\".");
+        return Ok(());
+    }
+
+    for hit in hits {
+        println!(
+            "{}  [{}]  (score {:.2})",
+            hit.headword, hit.dictionary, hit.score
+        );
     }
     Ok(())
 }

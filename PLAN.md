@@ -127,10 +127,29 @@ so both share the same backend).
     `list` shows GCIDE + mini → `lookup hello` returns hits from both (source-tagged)
     → `disable`/`remove` persist. `cargo test`/`clippy`/`fmt` all clean on 1.96.0.
 
-- [ ] **Phase 5 — Search engine (prefix → fuzzy → full-text).** Build a `tantivy`
-  index over headwords + definitions, cached in the app-data dir and rebuilt when a
-  dictionary is added. Expose exact, prefix/autocomplete, fuzzy, and full-text query
-  modes through `SearchEngine`; wire into the CLI `search` command.
+- [x] **Phase 5 — Search engine (prefix → fuzzy → full-text).** `SearchEngine`
+  (`crates/core/src/search.rs`) builds a `tantivy` 0.26 index over headwords +
+  definitions and exposes all four query modes via `SearchMode`
+  (`Exact`/`Prefix`/`Fuzzy`/`FullText`), wired into the CLI `search` command.
+  - **Schema:** `dictionary` (STRING|STORED source name), `key` (lowercased headword
+    as a single token — backs case-insensitive exact via `TermQuery`, prefix via
+    `RegexQuery` `^prefix.*`, and fuzzy via `FuzzyTermQuery` edit-distance 2),
+    `headword` (TEXT|STORED, original case — full-text + display), `definition`
+    (TEXT|STORED — full-text + snippet). Full-text uses `QueryParser` (lenient) over
+    `headword`+`definition` with BM25.
+  - **Entry iteration:** `Dictionary::for_each_entry` walks `idx.items` and pulls each
+    definition (disjoint field borrows of the `stardict` inner); `DictionaryManager::
+    for_each_enabled_entry` feeds only enabled dicts into the index.
+  - **Caching:** index stored at the OS cache dir (`search::default_index_dir`,
+    `~/.cache/irondict/index`). The CLI writes a `manifest` signature (sorted
+    name|path|word_count of enabled dicts); a `search` reuses the cached index when
+    the signature matches and rebuilds otherwise, so add/remove/enable/disable
+    invalidate it automatically. `build` clears any stale index dir to stay idempotent.
+  - Verified: `cargo test -p irondict-core` (29 tests, incl. `tests/search_test.rs`),
+    `cargo clippy --workspace --all-targets` and `cargo fmt --check` clean on 1.96.0.
+    End-to-end against bundled GCIDE in an isolated `XDG_CONFIG_HOME`/`XDG_CACHE_HOME`:
+    fuzzy `dictionarie`→`Dictionary`, prefix `diction`→`Diction…`, exact `dictionary`,
+    full-text `lexicographer` (definition-only hits), and second run reuses the cache.
 
 - [ ] **Phase 6 — GUI front-end (Slint).** `ui.slint` markup defines a
   search-as-you-type box → results list → definition pane, plus a dictionary
