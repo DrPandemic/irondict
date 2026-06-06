@@ -97,9 +97,20 @@ so both share the same backend).
   - **Bundling strategy decided:** commit the StarDict trio into the repo (offline,
     reproducible) rather than download-on-first-run.
 
-- [ ] **Phase 3 — Dictionary manager + config.** `DictionaryManager` over multiple
+- [x] **Phase 3 — Dictionary manager + config.** `DictionaryManager` over multiple
   dicts; persisted `Config` in the app-data dir; add/remove/enable; load preinstalled
   (GCIDE) + user dictionaries on startup.
+  - **Config** (`crates/core/src/config.rs`): TOML `[[dictionaries]] path + enabled`,
+    stored at the `directories` app-data path (`~/.config/irondict/config.toml`);
+    `load`/`save` (default path) + `load_from`/`save_to` (explicit path, for tests);
+    missing file → empty default, omitted `enabled` defaults to `true`.
+  - **Manager** (`crates/core/src/manager.rs`): `add`/`remove`/`set_enabled`,
+    aggregated `lookup` returning per-dictionary `LookupResult` (tagged with source),
+    `from_config` (collects per-dict load errors so one bad file doesn't abort
+    startup), `config()` snapshot for round-tripping, and `add_bundled_gcide()` via
+    `bundled_gcide_path()` (compile-time asset path; real packaging is Phase 7).
+  - Verified: `cargo test -p irondict-core` (20 tests), `cargo clippy`, `cargo fmt`
+    on Rust 1.96.0 (stable).
 
 - [ ] **Phase 4 — CLI front-end.** `clap` commands: `lookup <word>`, `add <path>`,
   `list`, `remove <name>`, `search <query>`. Aggregates results across enabled

@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 stardict = { version = "0.2", default-features = false }
 thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+directories = "5"
