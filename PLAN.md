@@ -71,7 +71,7 @@ so both share the same backend).
 
 ## Build order (one phase at a time)
 
-- [ ] **Phase 0 — Workspace scaffold.** Convert the single crate into a workspace;
+- [x] **Phase 0 — Workspace scaffold.** Convert the single crate into a workspace;
   create empty `irondict-core`, `irondict-cli`, `irondict-gui`. App compiles & runs
   stub binaries. Add the GPLv3 `LICENSE` file (done) and `Cargo.toml` license field
   (done). Update `CLAUDE.md` with the crate layout.
