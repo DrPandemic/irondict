@@ -4,7 +4,9 @@ pub mod model;
 pub mod stardict;
 
 pub use config::{Config, DictionaryConfig};
-pub use manager::{DictLoadError, DictionaryManager, LookupResult, ManagedDictionary};
+pub use manager::{
+    bundled_gcide_path, DictLoadError, DictionaryManager, LookupResult, ManagedDictionary,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

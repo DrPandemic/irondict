@@ -6,3 +6,5 @@ license.workspace = true
 
 [dependencies]
 irondict-core = { path = "../core" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"

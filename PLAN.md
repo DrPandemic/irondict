@@ -112,9 +112,20 @@ so both share the same backend).
   - Verified: `cargo test -p irondict-core` (20 tests), `cargo clippy`, `cargo fmt`
     on Rust 1.96.0 (stable).
 
-- [ ] **Phase 4 — CLI front-end.** `clap` commands: `lookup <word>`, `add <path>`,
-  `list`, `remove <name>`, `search <query>`. Aggregates results across enabled
-  dictionaries, prints source dictionary per result. First end-to-end usable build.
+- [x] **Phase 4 — CLI front-end.** `clap` commands implemented: `lookup <word>`,
+  `add <path>`, `list`, `remove <name>`, plus `enable <name>`/`disable <name>` (the
+  core `set_enabled` is otherwise unreachable from the CLI). `search <query>` is
+  deferred to Phase 5, where its `SearchEngine` actually lands. Aggregates results
+  across enabled dictionaries and prints the source dictionary per result.
+  - **Startup** (`crates/cli/src/main.rs` `load_manager`): loads `Config` from the
+    app-data dir and, on first run only (config file absent), seeds + persists the
+    bundled GCIDE so it's a normal config entry thereafter (so a later `remove gcide`
+    sticks). Per-dictionary load failures are printed as warnings, not fatal.
+  - **Persistence:** mutation commands (`add`/`remove`/`enable`/`disable`) save
+    `manager.config()` back to disk; `lookup`/`list` are read-only.
+  - Verified end-to-end in an isolated `XDG_CONFIG_HOME`: `add` the mini fixture →
+    `list` shows GCIDE + mini → `lookup hello` returns hits from both (source-tagged)
+    → `disable`/`remove` persist. `cargo test`/`clippy`/`fmt` all clean on 1.96.0.
 
 - [ ] **Phase 5 — Search engine (prefix → fuzzy → full-text).** Build a `tantivy`
   index over headwords + definitions, cached in the app-data dir and rebuilt when a
