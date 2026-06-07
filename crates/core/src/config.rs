@@ -38,6 +38,10 @@ pub struct Preferences {
     /// Accent color override as a `#rrggbb` string; `None` means "follow the OS".
     #[serde(default)]
     pub accent: Option<String>,
+    /// The dictionary scope selected last, by dictionary name; `None` means the
+    /// "All" scope. Restored on launch so the app reopens where you left off.
+    #[serde(default)]
+    pub last_scope: Option<String>,
 }
 
 /// One dictionary as recorded in the persisted config: where it lives on disk,

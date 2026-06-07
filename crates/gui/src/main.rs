@@ -144,8 +144,8 @@ fn main() -> Result<(), slint::PlatformError> {
     let engine: Rc<RefCell<Option<SearchEngine>>> = Rc::new(RefCell::new(None));
     let results_model: Rc<VecModel<ResultItem>> = Rc::new(VecModel::default());
     ui.set_results(ModelRc::from(results_model.clone()));
-    let senses_model: Rc<VecModel<SharedString>> = Rc::new(VecModel::default());
-    ui.set_senses(ModelRc::from(senses_model.clone()));
+    let blocks_model: Rc<VecModel<DefBlock>> = Rc::new(VecModel::default());
+    ui.set_def_blocks(ModelRc::from(blocks_model.clone()));
     let rows: Rc<RefCell<Vec<RowData>>> = Rc::new(RefCell::new(Vec::new()));
     let dict_items: Rc<VecModel<DictRow>> = Rc::new(VecModel::default());
     ui.set_dict_items(ModelRc::from(dict_items.clone()));
@@ -166,6 +166,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let prefs = manager.borrow().preferences().clone();
         ui.set_theme_mode(theme_mode_index(prefs.theme_mode));
         ui.set_accent_choice(accent_choice_index(&prefs));
+    }
+
+    // Restore the last-used dictionary scope (refresh_lists reset it to "All").
+    {
+        let last = manager.borrow().preferences().last_scope.clone();
+        ui.set_scope(scope_index_for(&manager, last.as_deref()));
     }
 
     // Apply the theme (persisted override, else OS detection) without blocking
@@ -189,7 +195,7 @@ fn main() -> Result<(), slint::PlatformError> {
     show_word(
         &ui,
         &manager,
-        &senses_model,
+        &blocks_model,
         &wotm,
         "WORD OF THE MOMENT",
         None,
@@ -214,7 +220,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let manager = manager.clone();
         let engine = engine.clone();
         let results_model = results_model.clone();
-        let senses_model = senses_model.clone();
+        let blocks_model = blocks_model.clone();
         let rows = rows.clone();
         index_timer.start(
             TimerMode::Repeated,
@@ -231,7 +237,7 @@ fn main() -> Result<(), slint::PlatformError> {
                             &manager,
                             &engine,
                             &results_model,
-                            &senses_model,
+                            &blocks_model,
                             &rows,
                             &q,
                         );
@@ -239,8 +245,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
                 Ok(Err(msg)) => {
                     let ui = ui_weak.unwrap();
-                    ui.set_def_headword("Couldn't build index".into());
-                    ui.set_def_body(msg.into());
+                    show_message(&ui, &blocks_model, "Couldn't build index", &msg);
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {}
@@ -254,7 +259,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let manager = manager.clone();
         let engine = engine.clone();
         let results_model = results_model.clone();
-        let senses_model = senses_model.clone();
+        let blocks_model = blocks_model.clone();
         let rows = rows.clone();
         let wotm = wotm.clone();
         // Debounce: keep typing responsive by deferring the (render-heavy) search
@@ -271,7 +276,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 show_word(
                     &ui,
                     &manager,
-                    &senses_model,
+                    &blocks_model,
                     &wotm,
                     "WORD OF THE MOMENT",
                     None,
@@ -282,7 +287,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let manager = manager.clone();
             let engine = engine.clone();
             let results_model = results_model.clone();
-            let senses_model = senses_model.clone();
+            let blocks_model = blocks_model.clone();
             let rows = rows.clone();
             debounce.start(
                 TimerMode::SingleShot,
@@ -294,7 +299,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         &manager,
                         &engine,
                         &results_model,
-                        &senses_model,
+                        &blocks_model,
                         &rows,
                         &ui.get_query(),
                     );
@@ -307,7 +312,7 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = ui.as_weak();
         let manager = manager.clone();
-        let senses_model = senses_model.clone();
+        let blocks_model = blocks_model.clone();
         let rows = rows.clone();
         ui.on_select(move |row| {
             let ui = ui_weak.unwrap();
@@ -321,7 +326,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 show_word(
                     &ui,
                     &manager,
-                    &senses_model,
+                    &blocks_model,
                     &headword,
                     "",
                     filter.as_deref(),
@@ -337,7 +342,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let manager = manager.clone();
         let engine = engine.clone();
         let results_model = results_model.clone();
-        let senses_model = senses_model.clone();
+        let blocks_model = blocks_model.clone();
         let rows = rows.clone();
         let wotm = wotm.clone();
         ui.on_scope_changed(move |idx| {
@@ -347,12 +352,16 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             }
             ui.set_scope(idx);
+            // Remember the choice so the next launch reopens on this dictionary.
+            let name = scope_filter(idx, &manager);
+            manager.borrow_mut().preferences_mut().last_scope = name;
+            save_config(&manager);
             let q = ui.get_query();
             if q.trim().is_empty() {
                 show_word(
                     &ui,
                     &manager,
-                    &senses_model,
+                    &blocks_model,
                     &wotm,
                     "WORD OF THE MOMENT",
                     None,
@@ -363,7 +372,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     &manager,
                     &engine,
                     &results_model,
-                    &senses_model,
+                    &blocks_model,
                     &rows,
                     &q,
                 );
@@ -680,6 +689,22 @@ fn scope_filter(scope: i32, manager: &Rc<RefCell<DictionaryManager>>) -> Option<
         .map(|d| d.name().to_string())
 }
 
+/// The scope index for a dictionary `name` (`None` = "All"). Falls back to "All"
+/// (0) when the named dictionary is gone or disabled.
+fn scope_index_for(manager: &Rc<RefCell<DictionaryManager>>, name: Option<&str>) -> i32 {
+    let Some(name) = name else {
+        return 0;
+    };
+    manager
+        .borrow()
+        .dictionaries()
+        .iter()
+        .filter(|d| d.enabled)
+        .position(|d| d.name() == name)
+        .map(|p| p as i32 + 1)
+        .unwrap_or(0)
+}
+
 /// A friendlier label for a StarDict bookname (e.g. the bundled
 /// `dictd_www.dict.org_gcide` shows up as `GCIDE`).
 fn pretty_dict_name(name: &str) -> String {
@@ -691,18 +716,15 @@ fn pretty_dict_name(name: &str) -> String {
 }
 
 /// Show a plain text message (no entry) in the definition pane.
-fn show_message(
-    ui: &AppWindow,
-    senses_model: &Rc<VecModel<SharedString>>,
-    title: &str,
-    body: &str,
-) {
+fn show_message(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, title: &str, body: &str) {
     ui.set_section_label("".into());
     ui.set_def_headword(title.into());
     ui.set_def_pron("".into());
     ui.set_def_pos("".into());
-    senses_model.set_vec(Vec::new());
-    ui.set_def_body(body.into());
+    blocks_model.set_vec(vec![DefBlock {
+        number: 0,
+        text: body.into(),
+    }]);
     ui.set_def_source("".into());
 }
 
@@ -712,7 +734,7 @@ fn run_search(
     manager: &Rc<RefCell<DictionaryManager>>,
     engine: &Rc<RefCell<Option<SearchEngine>>>,
     results_model: &Rc<VecModel<ResultItem>>,
-    senses_model: &Rc<VecModel<SharedString>>,
+    blocks_model: &Rc<VecModel<DefBlock>>,
     rows: &Rc<RefCell<Vec<RowData>>>,
     query: &str,
 ) {
@@ -722,7 +744,7 @@ fn run_search(
     let Some(eng) = eng_ref.as_ref() else {
         show_message(
             ui,
-            senses_model,
+            blocks_model,
             "Preparing dictionary…",
             "Building the search index — one moment.",
         );
@@ -772,7 +794,7 @@ fn run_search(
         show_word(
             ui,
             manager,
-            senses_model,
+            blocks_model,
             &first.headword,
             "",
             filter.as_deref(),
@@ -781,7 +803,7 @@ fn run_search(
         ui.set_selected_index(-1);
         show_message(
             ui,
-            senses_model,
+            blocks_model,
             "No results",
             &format!("Nothing matches \u{201c}{needle}\u{201d}."),
         );
@@ -792,43 +814,67 @@ fn run_search(
 fn show_word(
     ui: &AppWindow,
     manager: &Rc<RefCell<DictionaryManager>>,
-    senses_model: &Rc<VecModel<SharedString>>,
+    blocks_model: &Rc<VecModel<DefBlock>>,
     headword: &str,
     label: &str,
     filter: Option<&str>,
 ) {
-    let (raw, source) = lookup_raw(manager, headword, filter);
+    let (raw, source, html) = lookup_raw(manager, headword, filter);
     if raw.is_empty() {
-        show_message(ui, senses_model, headword, "No definition found.");
+        show_message(ui, blocks_model, headword, "No definition found.");
         ui.set_section_label(label.into());
         return;
     }
 
-    let parsed = parse_entry(&raw);
     ui.set_section_label(label.into());
     ui.set_def_headword(headword.into());
-    ui.set_def_pron(parsed.pronunciation.into());
-    ui.set_def_pos(parsed.pos.into());
     ui.set_def_source(source.into());
 
-    if parsed.senses.is_empty() {
-        // Fall back to lightly-cleaned text when we couldn't split senses.
-        senses_model.set_vec(Vec::new());
-        ui.set_def_body(cleaned_plain(&raw).into());
+    let blocks: Vec<DefBlock> = if html {
+        // HTML entry (e.g. Petit Robert): no GCIDE pos/pron. Convert to plain-text
+        // paragraphs so tags don't show, and so the body can be virtualized.
+        ui.set_def_pron("".into());
+        ui.set_def_pos("".into());
+        html_to_blocks(&raw)
+            .into_iter()
+            .map(|t| DefBlock {
+                number: 0,
+                text: t.into(),
+            })
+            .collect()
     } else {
-        ui.set_def_body("".into());
-        let senses: Vec<SharedString> = parsed.senses.into_iter().map(SharedString::from).collect();
-        senses_model.set_vec(senses);
-    }
+        let parsed = parse_entry(&raw);
+        ui.set_def_pron(parsed.pronunciation.into());
+        ui.set_def_pos(parsed.pos.into());
+        if parsed.senses.is_empty() {
+            // Fall back to lightly-cleaned text when we couldn't split senses.
+            vec![DefBlock {
+                number: 0,
+                text: cleaned_plain(&raw).into(),
+            }]
+        } else {
+            parsed
+                .senses
+                .into_iter()
+                .enumerate()
+                .map(|(i, s)| DefBlock {
+                    number: i as i32 + 1,
+                    text: s.into(),
+                })
+                .collect()
+        }
+    };
+    blocks_model.set_vec(blocks);
 }
 
-/// Look up `headword` and return (joined raw definition text, source name).
-/// When `filter` is set, only that dictionary's results are considered.
+/// Look up `headword` and return (joined raw definition text, source name,
+/// whether the entry is HTML). When `filter` is set, only that dictionary's
+/// results are considered.
 fn lookup_raw(
     manager: &Rc<RefCell<DictionaryManager>>,
     headword: &str,
     filter: Option<&str>,
-) -> (String, String) {
+) -> (String, String, bool) {
     let mut m = manager.borrow_mut();
     match m.lookup(headword) {
         Ok(results) if !results.is_empty() => {
@@ -837,9 +883,16 @@ fn lookup_raw(
                 .filter(|r| filter.is_none_or(|name| r.dictionary == name))
                 .collect();
             let Some(first) = results.first() else {
-                return (String::new(), String::new());
+                return (String::new(), String::new(), false);
             };
             let source = first.dictionary.clone();
+            // StarDict type 'h' = HTML (`sametypesequence=h`, e.g. Petit Robert).
+            let html = first
+                .entries
+                .first()
+                .and_then(|e| e.segments.first())
+                .map(|s| s.type_.contains('h'))
+                .unwrap_or(false);
             let mut parts = Vec::new();
             for r in &results {
                 for e in &r.entries {
@@ -851,10 +904,190 @@ fn lookup_raw(
                     );
                 }
             }
-            (parts.join("\n\n"), source)
+            (parts.join("\n\n"), source, html)
         }
-        _ => (String::new(), String::new()),
+        _ => (String::new(), String::new(), false),
     }
+}
+
+// ---- HTML entry rendering (StarDict type 'h') ----
+
+/// Convert an HTML dictionary entry into plain-text paragraphs: split on
+/// block-level tags, strip the rest, and decode entities. Long paragraphs are
+/// chopped so each ListView delegate stays small (and the body renders at 60fps).
+fn html_to_blocks(html: &str) -> Vec<String> {
+    let chars: Vec<char> = html.chars().collect();
+    let mut paras: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '<' => {
+                let start = i + 1;
+                let mut j = start;
+                while j < chars.len() && chars[j] != '>' {
+                    j += 1;
+                }
+                let tag: String = chars[start..j].iter().collect();
+                if is_block_tag(&tag) {
+                    flush_paragraph(&mut cur, &mut paras);
+                }
+                i = if j < chars.len() { j + 1 } else { j };
+            }
+            '&' => {
+                let limit = (i + 12).min(chars.len());
+                let mut j = i + 1;
+                while j < limit && chars[j] != ';' {
+                    j += 1;
+                }
+                if j < limit && chars[j] == ';' {
+                    let ent: String = chars[i + 1..j].iter().collect();
+                    if let Some(s) = decode_entity(&ent) {
+                        cur.push_str(&s);
+                    }
+                    i = j + 1;
+                } else {
+                    cur.push('&');
+                    i += 1;
+                }
+            }
+            c => {
+                cur.push(c);
+                i += 1;
+            }
+        }
+    }
+    flush_paragraph(&mut cur, &mut paras);
+
+    let mut out = Vec::new();
+    for p in paras {
+        if p.chars().count() > 900 {
+            out.extend(split_long(&p, 800));
+        } else {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// Collapse whitespace in `cur`, push it as a paragraph if non-empty, and reset.
+fn flush_paragraph(cur: &mut String, paras: &mut Vec<String>) {
+    let p = collapse_ws(cur);
+    if !p.is_empty() {
+        paras.push(p);
+    }
+    cur.clear();
+}
+
+/// Whether an HTML tag is block-level (so it ends the current paragraph).
+fn is_block_tag(tag: &str) -> bool {
+    let name: String = tag
+        .trim()
+        .trim_start_matches('/')
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "div"
+            | "p"
+            | "br"
+            | "li"
+            | "ul"
+            | "ol"
+            | "tr"
+            | "table"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "blockquote"
+            | "hr"
+            | "dd"
+            | "dt"
+            | "dl"
+    )
+}
+
+/// Decode an HTML entity body (the text between `&` and `;`).
+fn decode_entity(ent: &str) -> Option<String> {
+    if let Some(num) = ent.strip_prefix('#') {
+        let code = match num.strip_prefix(['x', 'X']) {
+            Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+            None => num.parse::<u32>().ok()?,
+        };
+        return char::from_u32(code).map(|c| c.to_string());
+    }
+    Some(
+        match ent {
+            "amp" => "&",
+            "lt" => "<",
+            "gt" => ">",
+            "quot" => "\"",
+            "apos" => "'",
+            "nbsp" => " ",
+            "laquo" => "«",
+            "raquo" => "»",
+            "hellip" => "…",
+            "mdash" => "—",
+            "ndash" => "–",
+            "rsquo" => "\u{2019}",
+            "lsquo" => "\u{2018}",
+            "deg" => "°",
+            "agrave" => "à",
+            "acirc" => "â",
+            "aelig" => "æ",
+            "ccedil" => "ç",
+            "eacute" => "é",
+            "egrave" => "è",
+            "ecirc" => "ê",
+            "euml" => "ë",
+            "icirc" => "î",
+            "iuml" => "ï",
+            "ocirc" => "ô",
+            "oelig" => "œ",
+            "ugrave" => "ù",
+            "ucirc" => "û",
+            "uuml" => "ü",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
+/// Split a long plain-text paragraph into ≤`max`-char pieces at word boundaries.
+fn split_long(s: &str, max: usize) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let end = (start + max).min(chars.len());
+        let mut cut = end;
+        if end < chars.len() {
+            let mut k = end;
+            while k > start && chars[k] != ' ' {
+                k -= 1;
+            }
+            if k > start {
+                cut = k;
+            }
+        }
+        let piece: String = chars[start..cut].iter().collect();
+        let piece = piece.trim();
+        if !piece.is_empty() {
+            out.push(piece.to_string());
+        }
+        start = cut;
+    }
+    out
+}
+
+/// Strip HTML to a single plain-text string (used for result-list snippets).
+fn strip_html(html: &str) -> String {
+    html_to_blocks(html).join(" ")
 }
 
 // ---- GCIDE markup parsing (display only; proper rendering is Phase 7) ----
@@ -1048,11 +1281,16 @@ fn cleaned_plain(raw: &str) -> String {
     joined.trim().to_string()
 }
 
-/// A one-line preview for the results list: prefer the first numbered sense.
+/// A one-line preview for the results list. HTML entries are stripped to text;
+/// GCIDE entries prefer the first numbered sense.
 fn make_snippet(raw: &str) -> String {
-    let flat = collapse_ws(&strip_braces(raw));
-    let start = flat.find(" 1. ").map(|i| i + 4).unwrap_or(0);
-    let tail = decode_gcide(&flat[start..]);
+    let tail = if raw.contains('<') {
+        strip_html(raw)
+    } else {
+        let flat = collapse_ws(&strip_braces(raw));
+        let start = flat.find(" 1. ").map(|i| i + 4).unwrap_or(0);
+        decode_gcide(&flat[start..])
+    };
     let mut chars = tail.chars();
     let head: String = chars.by_ref().take(90).collect();
     if chars.next().is_some() {
@@ -1148,6 +1386,35 @@ fn decode_code(code: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn html_entry_becomes_clean_paragraphs() {
+        let html = "<DIV style=\"font-weight:bold\">manger</DIV> \
+                    <DIV>Ce verbe vient du <SPAN style=\"color: maroon\">latin</span> \
+                    <SPAN style=\"font-style:italic\">manducare</span> &laquo; m&acirc;cher &raquo;.</DIV>";
+        let blocks = html_to_blocks(html);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0], "manger");
+        assert_eq!(blocks[1], "Ce verbe vient du latin manducare « mâcher ».");
+        // no raw tags leak through
+        assert!(blocks.iter().all(|b| !b.contains('<') && !b.contains('>')));
+    }
+
+    #[test]
+    fn decodes_numeric_and_named_entities() {
+        assert_eq!(decode_entity("#233").as_deref(), Some("é"));
+        assert_eq!(decode_entity("#xE9").as_deref(), Some("é"));
+        assert_eq!(decode_entity("nbsp").as_deref(), Some(" "));
+        assert_eq!(decode_entity("notathing"), None);
+    }
+
+    #[test]
+    fn long_paragraph_is_split_into_small_blocks() {
+        let long = "mot ".repeat(400); // ~1600 chars, one paragraph
+        let blocks = html_to_blocks(&format!("<p>{long}</p>"));
+        assert!(blocks.len() > 1);
+        assert!(blocks.iter().all(|b| b.chars().count() <= 800));
+    }
 
     #[test]
     fn decodes_phonetic_diacritics() {
