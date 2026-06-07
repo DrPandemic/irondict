@@ -1085,11 +1085,6 @@ fn split_long(s: &str, max: usize) -> Vec<String> {
     out
 }
 
-/// Strip HTML to a single plain-text string (used for result-list snippets).
-fn strip_html(html: &str) -> String {
-    html_to_blocks(html).join(" ")
-}
-
 // ---- GCIDE markup parsing (display only; proper rendering is Phase 7) ----
 
 /// A parsed GCIDE entry: pronunciation respelling, part of speech, and senses.
@@ -1285,7 +1280,13 @@ fn cleaned_plain(raw: &str) -> String {
 /// GCIDE entries prefer the first numbered sense.
 fn make_snippet(raw: &str) -> String {
     let tail = if raw.contains('<') {
-        strip_html(raw)
+        // HTML entry: drop the leading headword block so the preview shows the
+        // definition text, not a repeat of the card title.
+        let mut blocks = html_to_blocks(raw);
+        if blocks.len() > 1 {
+            blocks.remove(0);
+        }
+        blocks.join(" ")
     } else {
         let flat = collapse_ws(&strip_braces(raw));
         let start = flat.find(" 1. ").map(|i| i + 4).unwrap_or(0);

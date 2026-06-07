@@ -35,8 +35,11 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
-/// Leading slice of a stored definition, for result-list previews.
-const SNIPPET_LEN: usize = 300;
+/// Leading slice of a stored definition, for result-list previews. Generous
+/// because HTML entries (e.g. Petit Robert) can open with a few hundred
+/// characters of inline-CSS tags before any visible text; front-ends strip the
+/// markup and then truncate to a display length.
+const SNIPPET_LEN: usize = 800;
 
 /// Tantivy schema field handles for the dictionary index.
 #[derive(Clone, Copy)]
