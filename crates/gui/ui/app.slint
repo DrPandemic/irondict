@@ -30,15 +30,27 @@ export component AppWindow inherits Window {
     min-height: 420px;
     default-font-family: "IBM Plex Sans";
     default-font-size: 14px;
-    background: #ffffff;
+    background: bg;
 
-    // ---- theming (accent comes from Rust; defaults to indigo) ----
-    in property <color> accent: #4f46e5;
-    in property <color> accent-tint: #eef0fd;
-    property <color> text-primary: #1c1c1e;
-    property <color> text-secondary: #8a8a8e;
-    property <color> divider: #ececec;
-    property <color> toolbar-bg: #fafafa;
+    // ---- theming (accent + dark come from the OS, via Rust) ----
+    // `os-accent` is the raw OS accent (defaults to indigo); `dark` mirrors the
+    // OS light/dark preference. Everything else is derived so the whole palette
+    // flips with one boolean.
+    in property <color> os-accent: #4f46e5;
+    in property <bool> dark: false;
+
+    // Accent is brightened a touch in dark mode so it stays legible as text/lines
+    // against a dark background; the tint is a translucent wash that reads
+    // correctly over whatever background it is drawn on.
+    property <color> accent: dark ? os-accent.brighter(0.35) : os-accent;
+    property <color> accent-tint: accent.with-alpha(dark ? 0.22 : 0.12);
+
+    property <color> bg: dark ? #1d1d20 : #ffffff;
+    property <color> control-bg: dark ? #2c2c30 : #ffffff;
+    property <color> text-primary: dark ? #f2f2f4 : #1c1c1e;
+    property <color> text-secondary: dark ? #98989e : #8a8a8e;
+    property <color> divider: dark ? #38383c : #ececec;
+    property <color> toolbar-bg: dark ? #252528 : #fafafa;
 
     // ---- state (driven by Rust) ----
     in-out property <string> query;
@@ -46,7 +58,8 @@ export component AppWindow inherits Window {
     in-out property <int> selected-index: 0;
     in property <bool> searching: false;
     in property <bool> index-ready: false;
-    in property <int> scope: 0;            // 0 = All, 1 = GCIDE
+    in property <int> scope: 0;            // 0 = All, 1.. = one per dictionary
+    in property <[string]> scopes: ["All"]; // segment labels (driven by Rust)
 
     in property <string> section-label;    // e.g. "WORD OF THE MOMENT"
     in property <string> def-headword;
@@ -68,18 +81,15 @@ export component AppWindow inherits Window {
     }
 
     FocusScope {
-        // Ctrl+1 / Ctrl+2 pick a dictionary scope; Ctrl+Tab cycles.
+        // Ctrl+1 = All, Ctrl+2 = first dictionary, …; Ctrl+Tab cycles.
         key-pressed(event) => {
-            if (event.modifiers.control && event.text == "1") {
-                root.scope-changed(0);
-                return EventResult.accept;
-            }
-            if (event.modifiers.control && event.text == "2") {
-                root.scope-changed(1);
+            if (event.modifiers.control && event.text >= "1" && event.text <= "9") {
+                // text is a single digit here; map "1" → index 0, etc.
+                root.scope-changed(event.text.to-float() - 1);
                 return EventResult.accept;
             }
             if (event.modifiers.control && event.text == Key.Tab) {
-                root.scope-changed(root.scope == 0 ? 1 : 0);
+                root.scope-changed(Math.mod(root.scope + 1, root.scopes.length));
                 return EventResult.accept;
             }
             return EventResult.reject;
@@ -91,32 +101,39 @@ export component AppWindow inherits Window {
             height: 52px;
             background: toolbar-bg;
 
-            // scope segmented control (left)
+            // scope segmented control (left) — one segment per scope label,
+            // sized to its contents so it grows as dictionaries are added.
             Rectangle {
                 x: 16px;
                 y: (parent.height - self.height) / 2;
                 height: 30px;
-                width: 168px;
+                width: scope-row.preferred-width;
                 border-radius: 8px;
-                background: #ffffff;
+                background: control-bg;
                 border-width: 1px;
                 border-color: divider;
-                HorizontalLayout {
+                scope-row := HorizontalLayout {
                     padding: 3px;
                     spacing: 2px;
-                    for seg[idx] in ["All", "GCIDE"]: Rectangle {
+                    for seg[idx] in root.scopes: Rectangle {
+                        max-width: 180px;
                         border-radius: 6px;
                         background: scope == idx ? accent : transparent;
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            Text {
+                                text: seg;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                font-size: 13px;
+                                font-weight: scope == idx ? 600 : 400;
+                                color: scope == idx ? #ffffff : text-secondary;
+                                overflow: elide;
+                            }
+                        }
                         TouchArea {
                             clicked => { root.scope-changed(idx); }
-                        }
-                        Text {
-                            text: seg;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            font-size: 13px;
-                            font-weight: scope == idx ? 600 : 400;
-                            color: scope == idx ? #ffffff : text-secondary;
                         }
                     }
                 }
@@ -129,7 +146,7 @@ export component AppWindow inherits Window {
                 height: 32px;
                 width: 280px;
                 border-radius: 8px;
-                background: #ffffff;
+                background: control-bg;
                 border-width: 1px;
                 border-color: search-input.has-focus ? accent : divider;
                 HorizontalLayout {
@@ -175,7 +192,7 @@ export component AppWindow inherits Window {
             // results column (always visible)
             Rectangle {
                 width: 244px;
-                background: #ffffff;
+                background: bg;
                 ListView {
                     for item[i] in results: Rectangle {
                         height: 60px;
@@ -224,7 +241,7 @@ export component AppWindow inherits Window {
             // definition pane (the hero)
             Rectangle {
                 horizontal-stretch: 1;
-                background: #ffffff;
+                background: bg;
                 ScrollView {
                     VerticalLayout {
                         padding: 40px;

@@ -1,9 +1,11 @@
-//! Best-effort OS accent-color detection, so irondict blends with the desktop.
+//! Best-effort OS theme detection (accent color + light/dark), so irondict
+//! blends with the desktop.
 //!
 //! Detection order (first hit wins): the cross-desktop XDG portal
-//! `org.freedesktop.appearance` / `accent-color`, then GNOME `gsettings`, then an
-//! indigo fallback. It runs on a worker thread so it never blocks startup; the
-//! UI is updated through the Slint event loop once a result is available.
+//! `org.freedesktop.appearance`, then GNOME `gsettings`, then sensible fallbacks
+//! (indigo accent, light mode). It runs on a worker thread so it never blocks
+//! startup; the UI is updated through the Slint event loop once a result is
+//! available.
 
 use slint::{Color, Weak};
 
@@ -11,14 +13,17 @@ use crate::AppWindow;
 
 const INDIGO: (u8, u8, u8) = (0x4f, 0x46, 0xe5);
 
-/// Detect the OS accent in the background and apply it to `ui` when ready.
-pub fn apply_os_accent(ui: Weak<AppWindow>) {
+/// Detect the OS accent and light/dark preference in the background and apply
+/// them to `ui` when ready. The derived palette (tints, dark flip) lives in the
+/// `.slint`, so here we only push the raw accent and the dark boolean.
+pub fn apply_os_theme(ui: Weak<AppWindow>) {
     std::thread::spawn(move || {
         let (r, g, b) = detect_accent();
+        let dark = detect_dark();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = ui.upgrade() {
-                ui.set_accent(Color::from_rgb_u8(r, g, b));
-                ui.set_accent_tint(tint(r, g, b));
+                ui.set_os_accent(Color::from_rgb_u8(r, g, b));
+                ui.set_dark(dark);
             }
         });
     });
@@ -28,10 +33,16 @@ fn detect_accent() -> (u8, u8, u8) {
     portal_accent().or_else(gsettings_accent).unwrap_or(INDIGO)
 }
 
-/// A light wash of the accent over white, for selected rows and pills.
-fn tint(r: u8, g: u8, b: u8) -> Color {
-    let mix = |c: u8| (0.88 * 255.0 + 0.12 * c as f32).round() as u8;
-    Color::from_rgb_u8(mix(r), mix(g), mix(b))
+/// Whether the desktop prefers a dark color scheme (defaults to light).
+///
+/// `IRONDICT_DARK` overrides detection (`1`/`true`/`dark` → dark, anything else →
+/// light), which is handy for testing on desktops that don't report a
+/// preference.
+fn detect_dark() -> bool {
+    if let Ok(v) = std::env::var("IRONDICT_DARK") {
+        return matches!(v.to_lowercase().as_str(), "1" | "true" | "dark" | "yes");
+    }
+    portal_dark().or_else(gsettings_dark).unwrap_or(false)
 }
 
 /// XDG desktop portal: `org.freedesktop.appearance` / `accent-color` → `(ddd)`.
@@ -88,6 +99,47 @@ fn gsettings_accent() -> Option<(u8, u8, u8)> {
     }
     let s = String::from_utf8_lossy(&out.stdout);
     named_accent(s.trim().trim_matches('\''))
+}
+
+/// XDG desktop portal: `org.freedesktop.appearance` / `color-scheme` → `u`,
+/// where `1` means "prefer dark" (`0` = no preference, `2` = prefer light).
+fn portal_dark() -> Option<bool> {
+    let conn = zbus::blocking::Connection::session().ok()?;
+    let reply = conn
+        .call_method(
+            Some("org.freedesktop.portal.Desktop"),
+            "/org/freedesktop/portal/desktop",
+            Some("org.freedesktop.portal.Settings"),
+            "Read",
+            &("org.freedesktop.appearance", "color-scheme"),
+        )
+        .ok()?;
+    let value: zbus::zvariant::OwnedValue = reply.body().deserialize().ok()?;
+    Some(extract_u32(&value)? == 1)
+}
+
+/// Recursively unwrap variant layers to a `u32`.
+fn extract_u32(v: &zbus::zvariant::Value) -> Option<u32> {
+    use zbus::zvariant::Value;
+    match v {
+        Value::Value(inner) => extract_u32(inner),
+        Value::U32(n) => Some(*n),
+        _ => None,
+    }
+}
+
+/// GNOME fallback: `gsettings get org.gnome.desktop.interface color-scheme`,
+/// which is one of `'default'`, `'prefer-dark'`, `'prefer-light'`.
+fn gsettings_dark() -> Option<bool> {
+    let out = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "color-scheme"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    Some(s.contains("prefer-dark"))
 }
 
 /// The GNOME 47 named accent palette.

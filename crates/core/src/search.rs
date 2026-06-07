@@ -153,12 +153,25 @@ impl SearchEngine {
         })
     }
 
-    /// Run `query` in the given `mode`, returning up to `limit` ranked hits.
+    /// Run `query` in the given `mode`, returning up to `limit` ranked hits
+    /// across all dictionaries.
     pub fn search(
         &self,
         query: &str,
         mode: SearchMode,
         limit: usize,
+    ) -> Result<Vec<SearchHit>, Error> {
+        self.search_scoped(query, mode, limit, None)
+    }
+
+    /// Like [`search`](Self::search), but when `dictionary` is `Some(name)` the
+    /// results are restricted to that single source dictionary.
+    pub fn search_scoped(
+        &self,
+        query: &str,
+        mode: SearchMode,
+        limit: usize,
+        dictionary: Option<&str>,
     ) -> Result<Vec<SearchHit>, Error> {
         let query = query.trim();
         if query.is_empty() {
@@ -167,7 +180,7 @@ impl SearchEngine {
         // Fuzzy retrieval needs its own over-fetch + re-rank, so it bypasses the
         // generic single-query path below.
         if mode == SearchMode::Fuzzy {
-            return self.fuzzy_search(query, limit);
+            return self.fuzzy_search(query, limit, dictionary);
         }
         let parsed: Box<dyn Query> = match mode {
             SearchMode::Exact => {
@@ -188,6 +201,7 @@ impl SearchEngine {
                 parsed
             }
         };
+        let parsed = self.with_scope(parsed, dictionary);
 
         let searcher = self.reader.searcher();
         let docs = searcher
@@ -210,6 +224,24 @@ impl SearchEngine {
         Ok(hits)
     }
 
+    /// Wrap `query` so it only matches documents from `dictionary` (when set),
+    /// by ANDing it with an exact term query on the stored dictionary name.
+    fn with_scope(&self, query: Box<dyn Query>, dictionary: Option<&str>) -> Box<dyn Query> {
+        match dictionary {
+            None => query,
+            Some(name) => {
+                let term = Term::from_field_text(self.fields.dictionary, name);
+                Box::new(BooleanQuery::new(vec![
+                    (
+                        Occur::Must,
+                        Box::new(TermQuery::new(term, IndexRecordOption::Basic)) as Box<dyn Query>,
+                    ),
+                    (Occur::Must, query),
+                ]))
+            }
+        }
+    }
+
     /// Typo-tolerant headword search, ranked by actual edit distance.
     ///
     /// tantivy's [`FuzzyTermQuery`] is constant-scored (every match scores the
@@ -223,7 +255,12 @@ impl SearchEngine {
     /// 3. over-fetch and re-rank in Rust by true edit distance (transposition-
     ///    aware), with a first-character anchor as a prefix guard and stable
     ///    tie-breaks.
-    fn fuzzy_search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, Error> {
+    fn fuzzy_search(
+        &self,
+        query: &str,
+        limit: usize,
+        dictionary: Option<&str>,
+    ) -> Result<Vec<SearchHit>, Error> {
         let lower = query.to_lowercase();
         let len = lower.chars().count();
         // Mild length guard: a single character is too ambiguous to fuzz, but
@@ -257,14 +294,14 @@ impl SearchEngine {
                 )),
             ));
         }
-        let query = BooleanQuery::new(clauses);
+        let query = self.with_scope(Box::new(BooleanQuery::new(clauses)), dictionary);
 
         // Over-fetch so the Rust re-rank has room to find the closest matches
         // even when there are many equally-scored fuzzy candidates.
         let fetch = limit.saturating_mul(4).max(64);
         let searcher = self.reader.searcher();
         let docs = searcher
-            .search(&query, &TopDocs::with_limit(fetch).order_by_score())
+            .search(&*query, &TopDocs::with_limit(fetch).order_by_score())
             .map_err(map_err)?;
 
         let first = lower.chars().next();

@@ -86,8 +86,8 @@ fn warm_up(engine: &SearchEngine) {
 
 fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
-    ui.set_accent(slint::Color::from_rgb_u8(0x4f, 0x46, 0xe5));
-    ui.set_accent_tint(slint::Color::from_rgb_u8(0xee, 0xf0, 0xfd));
+    // The accent (indigo) and light default live in the .slint; the OS values are
+    // detected and applied below, off the startup path.
 
     let manager = Rc::new(RefCell::new(load_manager()));
     let engine: Rc<RefCell<Option<SearchEngine>>> = Rc::new(RefCell::new(None));
@@ -97,8 +97,23 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_senses(ModelRc::from(senses_model.clone()));
     let rows: Rc<RefCell<Vec<RowData>>> = Rc::new(RefCell::new(Vec::new()));
 
-    // Apply the OS accent color (falling back to indigo) without blocking startup.
-    theme::apply_os_accent(ui.as_weak());
+    // Scope control: "All" plus one segment per loaded dictionary. The segment
+    // index maps back to a dictionary at lookup time via `scope_filter`.
+    {
+        let mut labels: Vec<SharedString> = vec!["All".into()];
+        labels.extend(
+            manager
+                .borrow()
+                .dictionaries()
+                .iter()
+                .map(|d| pretty_dict_name(d.name()).into()),
+        );
+        ui.set_scopes(ModelRc::from(Rc::new(VecModel::from(labels))));
+    }
+
+    // Apply the OS theme (accent + light/dark, with fallbacks) without blocking
+    // startup.
+    theme::apply_os_theme(ui.as_weak());
 
     // Word of the moment: one fixed entry per launch (shown immediately, before
     // the index is ready).
@@ -114,7 +129,14 @@ fn main() -> Result<(), slint::PlatformError> {
             .and_then(|d| d.dictionary.nth_headword(seed))
             .unwrap_or_else(|| "irondict".to_string())
     };
-    show_word(&ui, &manager, &senses_model, &wotm, "WORD OF THE MOMENT");
+    show_word(
+        &ui,
+        &manager,
+        &senses_model,
+        &wotm,
+        "WORD OF THE MOMENT",
+        None,
+    );
 
     // Build/open the index off the UI thread; deliver it via a channel.
     let (tx, rx) = mpsc::channel::<Result<SearchEngine, String>>();
@@ -183,7 +205,14 @@ fn main() -> Result<(), slint::PlatformError> {
                 results_model.set_vec(Vec::new());
                 rows.borrow_mut().clear();
                 ui.set_selected_index(-1);
-                show_word(&ui, &manager, &senses_model, &wotm, "WORD OF THE MOMENT");
+                show_word(
+                    &ui,
+                    &manager,
+                    &senses_model,
+                    &wotm,
+                    "WORD OF THE MOMENT",
+                    None,
+                );
                 return;
             }
             let ui_weak = ui_weak.clone();
@@ -224,23 +253,88 @@ fn main() -> Result<(), slint::PlatformError> {
                 .get(row.max(0) as usize)
                 .map(|r| r.headword.clone());
             if let Some(headword) = headword {
+                let filter = scope_filter(ui.get_scope(), &manager);
                 ui.set_selected_index(row);
-                show_word(&ui, &manager, &senses_model, &headword, "");
+                show_word(
+                    &ui,
+                    &manager,
+                    &senses_model,
+                    &headword,
+                    "",
+                    filter.as_deref(),
+                );
             }
         });
     }
 
-    // Scope toggle (cosmetic until multi-dictionary support lands).
+    // Scope change: switch the active dictionary and re-run the current query
+    // (or fall back to the word of the moment when the search box is empty).
     {
         let ui_weak = ui.as_weak();
+        let manager = manager.clone();
+        let engine = engine.clone();
+        let results_model = results_model.clone();
+        let senses_model = senses_model.clone();
+        let rows = rows.clone();
+        let wotm = wotm.clone();
         ui.on_scope_changed(move |idx| {
-            ui_weak.unwrap().set_scope(idx);
+            let ui = ui_weak.unwrap();
+            // Ignore out-of-range scopes (e.g. Ctrl+5 with only two dictionaries).
+            if idx < 0 || idx as usize > manager.borrow().dictionaries().len() {
+                return;
+            }
+            ui.set_scope(idx);
+            let q = ui.get_query();
+            if q.trim().is_empty() {
+                show_word(
+                    &ui,
+                    &manager,
+                    &senses_model,
+                    &wotm,
+                    "WORD OF THE MOMENT",
+                    None,
+                );
+            } else {
+                run_search(
+                    &ui,
+                    &manager,
+                    &engine,
+                    &results_model,
+                    &senses_model,
+                    &rows,
+                    &q,
+                );
+            }
         });
     }
 
     let r = ui.run();
     drop(index_timer);
     r
+}
+
+/// Map a scope index to the dictionary it restricts results to: index 0 ("All")
+/// and any out-of-range index mean no restriction; index `n` selects the
+/// `n-1`th loaded dictionary.
+fn scope_filter(scope: i32, manager: &Rc<RefCell<DictionaryManager>>) -> Option<String> {
+    if scope <= 0 {
+        return None;
+    }
+    manager
+        .borrow()
+        .dictionaries()
+        .get(scope as usize - 1)
+        .map(|d| d.name().to_string())
+}
+
+/// A friendlier label for a StarDict bookname (e.g. the bundled
+/// `dictd_www.dict.org_gcide` shows up as `GCIDE`).
+fn pretty_dict_name(name: &str) -> String {
+    if name.to_lowercase().contains("gcide") {
+        "GCIDE".to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 /// Show a plain text message (no entry) in the definition pane.
@@ -270,6 +364,7 @@ fn run_search(
     query: &str,
 ) {
     let needle = query.trim();
+    let filter = scope_filter(ui.get_scope(), manager);
     let eng_ref = engine.borrow();
     let Some(eng) = eng_ref.as_ref() else {
         show_message(
@@ -281,14 +376,15 @@ fn run_search(
         return;
     };
 
-    // Prefix (autocomplete) first; fall back to fuzzy for typos.
+    // Prefix (autocomplete) first; fall back to fuzzy for typos. Both are scoped
+    // to the selected dictionary (or all, when no scope is active).
     let mut hits = eng
-        .search(needle, SearchMode::Prefix, 80)
+        .search_scoped(needle, SearchMode::Prefix, 80, filter.as_deref())
         .unwrap_or_default();
     if hits.is_empty() {
         // Fuzzy hits are already ranked by edit distance — keep that order.
         hits = eng
-            .search(needle, SearchMode::Fuzzy, 40)
+            .search_scoped(needle, SearchMode::Fuzzy, 40, filter.as_deref())
             .unwrap_or_default();
     } else {
         // Prefix hits are unranked; show the shortest (closest) completion first.
@@ -320,7 +416,14 @@ fn run_search(
 
     if let Some(first) = hits.first() {
         ui.set_selected_index(0);
-        show_word(ui, manager, senses_model, &first.headword, "");
+        show_word(
+            ui,
+            manager,
+            senses_model,
+            &first.headword,
+            "",
+            filter.as_deref(),
+        );
     } else {
         ui.set_selected_index(-1);
         show_message(
@@ -339,8 +442,9 @@ fn show_word(
     senses_model: &Rc<VecModel<SharedString>>,
     headword: &str,
     label: &str,
+    filter: Option<&str>,
 ) {
-    let (raw, source) = lookup_raw(manager, headword);
+    let (raw, source) = lookup_raw(manager, headword, filter);
     if raw.is_empty() {
         show_message(ui, senses_model, headword, "No definition found.");
         ui.set_section_label(label.into());
@@ -366,11 +470,23 @@ fn show_word(
 }
 
 /// Look up `headword` and return (joined raw definition text, source name).
-fn lookup_raw(manager: &Rc<RefCell<DictionaryManager>>, headword: &str) -> (String, String) {
+/// When `filter` is set, only that dictionary's results are considered.
+fn lookup_raw(
+    manager: &Rc<RefCell<DictionaryManager>>,
+    headword: &str,
+    filter: Option<&str>,
+) -> (String, String) {
     let mut m = manager.borrow_mut();
     match m.lookup(headword) {
         Ok(results) if !results.is_empty() => {
-            let source = results[0].dictionary.clone();
+            let results: Vec<_> = results
+                .into_iter()
+                .filter(|r| filter.is_none_or(|name| r.dictionary == name))
+                .collect();
+            let Some(first) = results.first() else {
+                return (String::new(), String::new());
+            };
+            let source = first.dictionary.clone();
             let mut parts = Vec::new();
             for r in &results {
                 for e in &r.entries {
