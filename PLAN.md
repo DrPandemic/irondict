@@ -108,7 +108,7 @@ so both share the same backend).
     aggregated `lookup` returning per-dictionary `LookupResult` (tagged with source),
     `from_config` (collects per-dict load errors so one bad file doesn't abort
     startup), `config()` snapshot for round-tripping, and `add_bundled_gcide()` via
-    `bundled_gcide_path()` (compile-time asset path; real packaging is Phase 7).
+    `bundled_gcide_path()` (compile-time asset path; real packaging is Phase 9).
   - Verified: `cargo test -p irondict-core` (20 tests), `cargo clippy`, `cargo fmt`
     on Rust 1.96.0 (stable).
 
@@ -210,15 +210,149 @@ so both share the same backend).
   live under the IBM/plex repo (note: not at `…/fonts/complete/ttf/` on `master` —
   that path 404s; find the current path when bundling).
 
-- [ ] **Phase 7 — Polish.** Rich definition rendering (HTML/markup data types,
-  including GCIDE's markup), search history, settings, packaging of GCIDE.
+- [x] **Phase 7 — Settings page (GUI).** A dedicated preferences surface, reachable
+  from a **gear button** in the toolbar (overlay/sheet over the definition pane, so
+  it doesn't disturb the search-as-you-type flow). This subsumes the
+  "dictionary-management panel" promised in Phase 6 and the "settings" item folded
+  into the old Polish phase.
+
+  **Sections:**
+  - **Dictionaries:** list every loaded dictionary with its **name + word count +
+    enabled toggle**; **add** (native file picker for a `.ifo`), **remove**, and
+    **enable/disable**. Writes back through `DictionaryManager::config()` →
+    `Config::save`, and the **scope control rebuilds** from the new set. Each entry
+    also exposes a **per-dictionary language** field (Auto / English / French / …) —
+    see the Phase 8 tie-in below.
+  - **Appearance:** **theme mode** (System / Light / Dark) overriding OS detection,
+    and **accent** (System vs. a custom color). Persisted; applied live to the
+    reactive Slint properties added in Phase 6.
+
+  **Decisions:**
+  - **File picker:** add **`rfd`** to `irondict-gui`. On Linux it uses the **XDG
+    Desktop Portal** file chooser, so it works on the sway/Wayland dev box without a
+    GTK dependency. Adding a dictionary therefore goes through the portal, not a
+    bespoke path field.
+  - **Persistence:** extend core **`Config`** with a `[preferences]` section
+    (`theme_mode`, `accent_override`) so the setting lives next to the dictionary
+    list and one front-end can't desync the other. `theme::detect_*` consult the
+    override before falling back to OS detection (generalizes the temporary
+    `IRONDICT_DARK` env override into a real, persisted setting).
+  - **Index lifecycle:** add/remove/enable must **invalidate + rebuild** the tantivy
+    index. Reuse the Phase 5 manifest-signature check and the Phase 6 background
+    build pattern (worker thread + channel + polling `Timer`): keep serving the old
+    index, show a "Reindexing…" state, then hot-swap the new `SearchEngine` in.
+
+  **Phase 8 tie-in (per-dictionary language):** the StarDict `.ifo` doesn't reliably
+  encode a language, so conjugation's language routing can't always rely on an
+  auto-detected hint. This page is where the user pins it: a per-dictionary
+  **language** setting (default **Auto**, which falls back to backend detection),
+  persisted in the same `[[dictionaries]]` config entry (new optional `language`
+  field). The conjugation registry (Phase 8) consults this pinned language first
+  before trying backends, which resolves cross-language homographs (e.g. *important*)
+  deterministically. Building this field now means Phase 8 has a real source of truth
+  instead of guessing.
+
+  **Implemented:**
+  - **Core config** (`crates/core/src/config.rs`): new `Language` (`auto`/`en`/`fr`),
+    `ThemeMode` (`system`/`light`/`dark`), and `Preferences { theme_mode, accent }`
+    enums/struct; `DictionaryConfig` gained a `#[serde(default)] language` field (plus
+    a `DictionaryConfig::new(path)` constructor so existing call sites and tests don't
+    repeat field defaults). `Config` gained `preferences`. The **manager** now carries
+    `Preferences` and per-dictionary `language`, round-tripped through `config()` /
+    `from_config` (so a CLI `add` no longer clobbers GUI-set preferences), with
+    `set_language` + `preferences()/preferences_mut()` accessors.
+  - **Settings overlay** (`crates/gui/ui/app.slint`): gear button in the toolbar opens
+    a centered panel over a dimmed backdrop (click-outside / ✕ to close). Dictionaries
+    section = a scrollable list of cards (name + grouped word count, a language
+    `ComboBox`, an enable `Switch`, and a remove ✕) plus an **Add dictionary…** button;
+    Appearance section = a System/Light/Dark segmented control and an accent row (Auto
+    + preset swatches). All driven by new properties (`dict-items: [DictRow]`,
+    `theme-mode`, `accent-swatches`, `accent-choice`) and callbacks.
+  - **Wiring** (`crates/gui/src/main.rs`): add uses the **`rfd`** portal file picker on
+    a worker thread (path returned over a channel, applied on the UI thread by a
+    polling timer); enable/disable/remove/add mutate the in-memory manager, persist via
+    `Config::save`, refresh the scope control + list, and **rebuild the index in the
+    background** (reusing the Phase 5 manifest signature + the Phase 6 engine channel,
+    hot-swapping the new `SearchEngine` when ready). The scope control now lists only
+    **enabled** dictionaries; `scope_filter` indexes into the enabled set. Theme/accent
+    changes update `Preferences`, persist, and re-run `apply_appearance` (persisted
+    override → else OS detection); `theme.rs` `apply_os_theme` now takes
+    `forced_dark`/`forced_accent` overrides (the old `IRONDICT_DARK` env override is
+    retained for dev) plus a `parse_hex` helper.
+  - **rfd** added to `irondict-gui` with `default-features = false, features =
+    ["xdg-portal", "async-std"]` so it uses the XDG portal (no GTK dep) on sway.
+  - Verified: `cargo build`, `cargo clippy --all-targets`, `cargo fmt --check`, and the
+    full test suite are clean on 1.96.0; the GUI launches and exits cleanly. The
+    interactive file-picker dialog itself still wants a hands-on test on the target
+    desktop.
+
+- [ ] **Phase 8 — Verb conjugation (English + French).** Given a verb headword,
+  surface its conjugation. Two languages are first-class: **English** (compact
+  principal parts) and **French** (the full person × tense × mood grid). The core
+  API is **language-aware** from the start so a third language is just another
+  backend.
+
+  **Core model** (`crates/core/src/conjugation.rs`) — general enough for both a tiny
+  English set and a large French grid:
+  - `Conjugation { language, infinitive, sections: Vec<ConjSection> }` where a
+    `ConjSection { label, forms: Vec<ConjForm { label, text }> }` is one mood/tense
+    (e.g. "Indicatif présent") holding its person-tagged forms. English collapses to
+    a single section of principal parts; French expands to many.
+  - A `Conjugator` trait (`fn conjugate(&self, headword) -> Option<Conjugation>`,
+    `fn language(&self) -> Lang`) with one implementation per language, plus a
+    registry that routes a lookup to the right backend.
+
+  **Language routing:** prefer the **per-dictionary language** pinned in the Phase 7
+  settings page (default **Auto**); when that is Auto, fall back to the StarDict
+  `.ifo` language if present, then try each registered backend and accept the first
+  that recognizes the headword as a verb. The pinned setting disambiguates
+  homographs that exist in both languages (e.g. *important*) deterministically.
+
+  **English backend** — three sources, highest-confidence first:
+  1. **Parse GCIDE's inflection block.** Verb entries encode principal parts right
+     after the POS, e.g. `\Go\ …, v. i. [imp. {Went}; p. p. {Gone}; p. pr. & vb. n.
+     {Going}.]` — `imp.` = past, `p. p.` = past participle, `p. pr. & vb. n.` =
+     present participle. These authoritative forms win.
+  2. **Rule-based generator** for regular verbs GCIDE didn't annotate: 3rd-singular
+     (`-s` / `-es` after sibilants / `y→ies`), past `-ed`, present participle `-ing`
+     (final-consonant doubling, silent-`e` drop).
+  3. **Irregular-verb table** (small committed data file) for common irregulars
+     (go/went/gone) when GCIDE supplied nothing.
+
+  **French backend** — data-driven, since French has three groups, ~7000 verbs, and
+  pervasive orthographic stem changes (`-cer→-ç-`, `-ger→-ge-`, `e→è`, `y→i`,
+  `appeler→appelle`) that don't reduce to a few rules:
+  - Use **Verbiste** data (`verbs-fr.xml` = verb→template index, `conjugation-fr.xml`
+    = ending templates per tense/person). It is **GPL**, so it redistributes cleanly
+    inside this GPL-3.0-or-later project. Commit it under `crates/core/assets/` like
+    GCIDE, with provenance + license recorded in `docs/`.
+  - Conjugation = look up the verb's template, then apply each template's
+    radical-change + endings to produce every form across **infinitif, indicatif
+    (présent, imparfait, futur, passé simple), conditionnel présent, subjonctif
+    présent/imparfait, impératif, participes (présent, passé)**, all six persons.
+  - This lexicon is **self-contained** — it conjugates whether or not a French
+    StarDict is loaded; a loaded French dictionary just gives the headword to look up.
+
+  **Front-ends:**
+  - **CLI:** `conjugate [--lang en|fr] <verb>` — prints principal parts (English) or
+    the conjugation table (French); language auto-detected when `--lang` is omitted.
+  - **GUI:** when the displayed entry is a recognized verb, render a **"Conjugation"**
+    block in the definition pane. English shows a compact line of principal parts;
+    French shows a **tense/person grid** (collapsible per section), styled like the
+    senses (accent section labels, selectable forms). Hidden for non-verbs.
+
+- [ ] **Phase 9 — Polish.** Rich definition rendering (HTML/markup data types,
+  including GCIDE's markup), search history, packaging of GCIDE.
 
 ## Critical files (to be created)
 
 - `Cargo.toml` (root) — convert to `[workspace]`.
 - `crates/core/src/{lib.rs, model.rs, stardict.rs, manager.rs, config.rs, search.rs}`
+- `crates/core/src/conjugation.rs` (+ committed data: an English irregular-verb table
+  and the French **Verbiste** XML `verbs-fr.xml` / `conjugation-fr.xml`) — Phase 8.
 - `crates/cli/src/main.rs` — `clap` CLI.
-- `crates/gui/` — `ui/ui.slint` (markup), `src/main.rs` (glue), `build.rs` (slint-build).
+- `crates/gui/` — `ui/ui.slint` (markup), `src/main.rs` (glue), `build.rs` (slint-build);
+  a settings overlay component (Phase 7).
 - `crates/core/tests/` + a small StarDict fixture for tests.
 
 ## Verification
@@ -234,6 +368,17 @@ so both share the same backend).
   hits for a word appearing only inside a definition.
 - **Phase 6:** `cargo run -p irondict-gui` — type a prefix, see live results, click an
   entry, see its definition; add/remove a dictionary from the UI.
+- **Phase 7:** open Settings, add a second StarDict via the file picker → it appears in
+  the scope control and the index rebuilds, then scope-filtered lookups work across
+  both; disable one → excluded; remove → gone; all of it survives a restart. Switch
+  the theme between System/Light/Dark and confirm it applies and persists.
+- **Phase 8:** English — `conjugate go` → went / gone / going (from GCIDE's
+  inflection block), `conjugate walk` → walks / walked / walking (rule-based). French
+  — `conjugate parler` → full regular `-er` table, `conjugate aller` → its irregular
+  forms (`je vais`, `nous allons`, futur `j'irai`…), and a stem-change verb like
+  `appeler` → `j'appelle`. Auto-detection picks the right language with `--lang`
+  omitted; the GUI shows a compact block for English verbs and a tense/person grid
+  for French, hidden for non-verbs.
 
 ## Open questions (can defer)
 

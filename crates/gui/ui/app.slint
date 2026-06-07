@@ -1,4 +1,4 @@
-import { ListView, ScrollView } from "std-widgets.slint";
+import { ListView, ScrollView, Button, Switch, ComboBox } from "std-widgets.slint";
 
 // Bundled IBM Plex Sans (SIL OFL). A bare file import registers the font at
 // compile time so "IBM Plex Sans" is available as a font-family.
@@ -12,6 +12,14 @@ struct ResultItem {
     headword: string,
     snippet: string,
     source: string,
+}
+
+// One row in the settings dictionary list.
+struct DictRow {
+    name: string,
+    words: string,
+    enabled: bool,
+    language: int,  // 0 = Auto, 1 = English, 2 = French
 }
 
 // Read-only text that the user can still select and copy (plain Text can't be
@@ -69,9 +77,25 @@ export component AppWindow inherits Window {
     in property <string> def-body;         // free text (messages / fallback)
     in property <string> def-source;
 
+    // ---- settings page ----
+    in-out property <bool> show-settings: false;
+    in property <[DictRow]> dict-items;
+    in property <int> theme-mode: 0;          // 0 System, 1 Light, 2 Dark
+    in property <[color]> accent-swatches;
+    in property <int> accent-choice: 0;       // 0 System, n = swatch n-1
+
     callback query-changed(string);
     callback select(int);
     callback scope-changed(int);
+
+    callback open-settings();
+    callback close-settings();
+    callback toggle-dict(int);
+    callback set-dict-language(int, int);
+    callback remove-dict(int);
+    callback add-dict();
+    callback set-theme-mode(int);
+    callback set-accent(int);
 
     // Focus the search field on launch; global shortcuts still bubble up to the
     // FocusScope below.
@@ -139,12 +163,32 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // search field (right)
+            // settings gear (far right)
             Rectangle {
                 x: parent.width - self.width - 16px;
                 y: (parent.height - self.height) / 2;
+                width: 32px;
                 height: 32px;
-                width: 280px;
+                border-radius: 8px;
+                background: gear-touch.has-hover ? divider : transparent;
+                gear-touch := TouchArea {
+                    clicked => { root.open-settings(); }
+                }
+                Text {
+                    text: "⚙";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-size: 18px;
+                    color: text-secondary;
+                }
+            }
+
+            // search field (right, left of the gear)
+            Rectangle {
+                x: parent.width - self.width - 16px - 32px - 10px;
+                y: (parent.height - self.height) / 2;
+                height: 32px;
+                width: 260px;
                 border-radius: 8px;
                 background: control-bg;
                 border-width: 1px;
@@ -333,6 +377,233 @@ export component AppWindow inherits Window {
                 }
             }
         }
+        }
+    }
+
+    // ===================== settings overlay =====================
+    if show-settings : Rectangle {
+        // dimmed backdrop; clicking it closes the panel
+        background: #00000080;
+        TouchArea {
+            clicked => { root.close-settings(); }
+        }
+
+        // panel (centered)
+        Rectangle {
+            width: min(560px, root.width - 80px);
+            height: min(640px, root.height - 80px);
+            background: bg;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: divider;
+            // absorb clicks so they don't fall through to the backdrop
+            TouchArea {}
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 14px;
+
+                // header
+                HorizontalLayout {
+                    Text {
+                        text: "Settings";
+                        font-size: 20px;
+                        font-weight: 700;
+                        color: text-primary;
+                        horizontal-stretch: 1;
+                    }
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 6px;
+                        background: close-touch.has-hover ? divider : transparent;
+                        close-touch := TouchArea {
+                            clicked => { root.close-settings(); }
+                        }
+                        Text {
+                            text: "✕";
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            color: text-secondary;
+                        }
+                    }
+                }
+
+                Text {
+                    text: "DICTIONARIES";
+                    font-size: 11px;
+                    font-weight: 600;
+                    color: accent;
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        for d[i] in dict-items: Rectangle {
+                            height: 58px;
+                            border-radius: 8px;
+                            background: control-bg;
+                            border-width: 1px;
+                            border-color: divider;
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 10px;
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    spacing: 2px;
+                                    Text {
+                                        text: d.name;
+                                        font-size: 14px;
+                                        font-weight: 500;
+                                        color: text-primary;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: d.words + " words";
+                                        font-size: 12px;
+                                        color: text-secondary;
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    ComboBox {
+                                        width: 116px;
+                                        model: ["Auto", "English", "French"];
+                                        current-index: d.language;
+                                        selected => { root.set-dict-language(i, self.current-index); }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Switch {
+                                        checked: d.enabled;
+                                        toggled => { root.toggle-dict(i); }
+                                    }
+                                }
+                                Rectangle {
+                                    width: 28px;
+                                    background: remove-touch.has-hover ? divider : transparent;
+                                    border-radius: 6px;
+                                    remove-touch := TouchArea {
+                                        clicked => { root.remove-dict(i); }
+                                    }
+                                    Text {
+                                        text: "✕";
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        font-size: 13px;
+                                        color: text-secondary;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: start;
+                    Button {
+                        text: "Add dictionary…";
+                        clicked => { root.add-dict(); }
+                    }
+                }
+
+                Text {
+                    text: "APPEARANCE";
+                    font-size: 11px;
+                    font-weight: 600;
+                    color: accent;
+                }
+
+                // theme mode segmented control
+                HorizontalLayout {
+                    spacing: 12px;
+                    Text {
+                        text: "Theme";
+                        vertical-alignment: center;
+                        font-size: 14px;
+                        color: text-primary;
+                        width: 70px;
+                    }
+                    Rectangle {
+                        height: 30px;
+                        width: 240px;
+                        border-radius: 8px;
+                        background: control-bg;
+                        border-width: 1px;
+                        border-color: divider;
+                        HorizontalLayout {
+                            padding: 3px;
+                            spacing: 2px;
+                            for seg[ti] in ["System", "Light", "Dark"]: Rectangle {
+                                border-radius: 6px;
+                                background: theme-mode == ti ? accent : transparent;
+                                Text {
+                                    text: seg;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    font-size: 13px;
+                                    font-weight: theme-mode == ti ? 600 : 400;
+                                    color: theme-mode == ti ? #ffffff : text-secondary;
+                                }
+                                TouchArea {
+                                    clicked => { root.set-theme-mode(ti); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // accent swatches (Auto + presets)
+                HorizontalLayout {
+                    spacing: 12px;
+                    Text {
+                        text: "Accent";
+                        vertical-alignment: center;
+                        font-size: 14px;
+                        color: text-primary;
+                        width: 70px;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        // "Auto" (follow the OS)
+                        Rectangle {
+                            width: 44px;
+                            height: 28px;
+                            border-radius: 8px;
+                            background: control-bg;
+                            border-width: accent-choice == 0 ? 2px : 1px;
+                            border-color: accent-choice == 0 ? accent : divider;
+                            Text {
+                                text: "Auto";
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                font-size: 11px;
+                                color: text-secondary;
+                            }
+                            TouchArea {
+                                clicked => { root.set-accent(0); }
+                            }
+                        }
+                        for sw[si] in accent-swatches: Rectangle {
+                            width: 28px;
+                            height: 28px;
+                            border-radius: 14px;
+                            background: sw;
+                            border-width: accent-choice == si + 1 ? 3px : 0px;
+                            border-color: text-primary;
+                            TouchArea {
+                                clicked => { root.set-accent(si + 1); }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

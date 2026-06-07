@@ -104,10 +104,9 @@ fn load_manager() -> Result<DictionaryManager> {
 
     let mut config = Config::load_from(&config_path).context("reading config")?;
     if first_run {
-        config.dictionaries.push(DictionaryConfig {
-            path: bundled_gcide_path(),
-            enabled: true,
-        });
+        config
+            .dictionaries
+            .push(DictionaryConfig::new(bundled_gcide_path()));
         config
             .save_to(&config_path)
             .context("writing initial config")?;

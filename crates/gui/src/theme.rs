@@ -13,13 +13,20 @@ use crate::AppWindow;
 
 const INDIGO: (u8, u8, u8) = (0x4f, 0x46, 0xe5);
 
-/// Detect the OS accent and light/dark preference in the background and apply
-/// them to `ui` when ready. The derived palette (tints, dark flip) lives in the
+/// Resolve the accent and light/dark preference in the background and apply them
+/// to `ui` when ready. The derived palette (tints, dark flip) lives in the
 /// `.slint`, so here we only push the raw accent and the dark boolean.
-pub fn apply_os_theme(ui: Weak<AppWindow>) {
+///
+/// `forced_dark` / `forced_accent` are the user's persisted overrides from the
+/// settings page; `None` means "follow the OS" and triggers detection.
+pub fn apply_os_theme(
+    ui: Weak<AppWindow>,
+    forced_dark: Option<bool>,
+    forced_accent: Option<(u8, u8, u8)>,
+) {
     std::thread::spawn(move || {
-        let (r, g, b) = detect_accent();
-        let dark = detect_dark();
+        let (r, g, b) = forced_accent.unwrap_or_else(detect_accent);
+        let dark = forced_dark.unwrap_or_else(detect_dark);
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = ui.upgrade() {
                 ui.set_os_accent(Color::from_rgb_u8(r, g, b));
@@ -27,6 +34,18 @@ pub fn apply_os_theme(ui: Weak<AppWindow>) {
             }
         });
     });
+}
+
+/// Parse a `#rrggbb` string into an RGB triple.
+pub fn parse_hex(s: &str) -> Option<(u8, u8, u8)> {
+    let h = s.strip_prefix('#').unwrap_or(s);
+    if h.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
+    Some((r, g, b))
 }
 
 fn detect_accent() -> (u8, u8, u8) {

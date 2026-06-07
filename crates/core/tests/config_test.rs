@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use irondict_core::{Config, DictionaryConfig};
+use irondict_core::{Config, DictionaryConfig, Language};
 
 mod common;
 use common::TempDir;
@@ -25,12 +25,15 @@ fn save_then_load_round_trips() {
             DictionaryConfig {
                 path: PathBuf::from("/dicts/gcide.ifo"),
                 enabled: true,
+                language: Language::English,
             },
             DictionaryConfig {
                 path: PathBuf::from("/dicts/user.ifo"),
                 enabled: false,
+                language: Language::Auto,
             },
         ],
+        ..Default::default()
     };
 
     config.save_to(&path).unwrap();

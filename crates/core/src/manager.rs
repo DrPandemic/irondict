@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::config::{Config, DictionaryConfig};
+use crate::config::{Config, DictionaryConfig, Language, Preferences};
 use crate::model::{Dictionary, Entry};
 use crate::Error;
 
@@ -19,6 +19,7 @@ pub fn bundled_gcide_path() -> PathBuf {
 pub struct ManagedDictionary {
     pub path: PathBuf,
     pub enabled: bool,
+    pub language: Language,
     pub dictionary: Dictionary,
 }
 
@@ -50,6 +51,7 @@ pub struct LookupResult {
 #[derive(Debug, Default)]
 pub struct DictionaryManager {
     dicts: Vec<ManagedDictionary>,
+    preferences: Preferences,
 }
 
 impl DictionaryManager {
@@ -61,12 +63,14 @@ impl DictionaryManager {
     /// per-dictionary load errors so a single failure doesn't prevent startup.
     pub fn from_config(config: &Config) -> (Self, Vec<DictLoadError>) {
         let mut manager = Self::new();
+        manager.preferences = config.preferences.clone();
         let mut errors = Vec::new();
         for dc in &config.dictionaries {
             match crate::stardict::load(&dc.path) {
                 Ok(dictionary) => manager.dicts.push(ManagedDictionary {
                     path: dc.path.clone(),
                     enabled: dc.enabled,
+                    language: dc.language,
                     dictionary,
                 }),
                 Err(error) => errors.push(DictLoadError {
@@ -99,6 +103,7 @@ impl DictionaryManager {
         self.dicts.push(ManagedDictionary {
             path: path.to_path_buf(),
             enabled: true,
+            language: Language::Auto,
             dictionary,
         });
         Ok(self.dicts.last().expect("just pushed"))
@@ -129,6 +134,28 @@ impl DictionaryManager {
         }
     }
 
+    /// Pin the language of the dictionary with the given name. Returns whether a
+    /// matching dictionary was found.
+    pub fn set_language(&mut self, name: &str, language: Language) -> bool {
+        match self.dicts.iter_mut().find(|d| d.name() == name) {
+            Some(d) => {
+                d.language = language;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The current UI preferences.
+    pub fn preferences(&self) -> &Preferences {
+        &self.preferences
+    }
+
+    /// Mutable access to the UI preferences (e.g. to change theme or accent).
+    pub fn preferences_mut(&mut self) -> &mut Preferences {
+        &mut self.preferences
+    }
+
     /// Look up `word` across all enabled dictionaries, returning one
     /// [`LookupResult`] per dictionary that has a non-empty match.
     pub fn lookup(&mut self, word: &str) -> Result<Vec<LookupResult>, Error> {
@@ -157,7 +184,8 @@ impl DictionaryManager {
         Ok(())
     }
 
-    /// Snapshot the current set of dictionaries as a persistable [`Config`].
+    /// Snapshot the current dictionaries and preferences as a persistable
+    /// [`Config`], so the whole app state round-trips through disk.
     pub fn config(&self) -> Config {
         Config {
             dictionaries: self
@@ -166,8 +194,10 @@ impl DictionaryManager {
                 .map(|d| DictionaryConfig {
                     path: d.path.clone(),
                     enabled: d.enabled,
+                    language: d.language,
                 })
                 .collect(),
+            preferences: self.preferences.clone(),
         }
     }
 }

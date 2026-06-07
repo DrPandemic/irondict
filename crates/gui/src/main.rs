@@ -6,18 +6,30 @@
 // moment) and search becomes live once the index is ready.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use regex::Regex;
-use slint::{ModelRc, SharedString, Timer, TimerMode, VecModel};
+use slint::{Color, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use irondict_core::{
-    bundled_gcide_path, search, Config, DictionaryConfig, DictionaryManager, SearchEngine,
-    SearchMode,
+    bundled_gcide_path, search, Config, DictionaryConfig, DictionaryManager, Language, Preferences,
+    SearchEngine, SearchMode, ThemeMode,
 };
+
+/// Preset accent swatches offered in the settings page, in display order. Index
+/// `n` here corresponds to `accent-choice == n + 1` in the UI (choice 0 = Auto).
+const ACCENT_SWATCHES: [(u8, u8, u8); 6] = [
+    (0x4f, 0x46, 0xe5), // indigo
+    (0x35, 0x84, 0xe4), // blue
+    (0x21, 0x90, 0xa4), // teal
+    (0x3a, 0x94, 0x4a), // green
+    (0xed, 0x5b, 0x00), // orange
+    (0xd5, 0x61, 0x99), // pink
+];
 
 mod theme;
 
@@ -35,10 +47,8 @@ fn load_manager() -> DictionaryManager {
         Ok(path) => {
             if !path.exists() {
                 let mut c = Config::default();
-                c.dictionaries.push(DictionaryConfig {
-                    path: bundled_gcide_path(),
-                    enabled: true,
-                });
+                c.dictionaries
+                    .push(DictionaryConfig::new(bundled_gcide_path()));
                 let _ = c.save_to(&path);
                 c
             } else {
@@ -47,10 +57,8 @@ fn load_manager() -> DictionaryManager {
         }
         Err(_) => {
             let mut c = Config::default();
-            c.dictionaries.push(DictionaryConfig {
-                path: bundled_gcide_path(),
-                enabled: true,
-            });
+            c.dictionaries
+                .push(DictionaryConfig::new(bundled_gcide_path()));
             c
         }
     };
@@ -61,19 +69,62 @@ fn load_manager() -> DictionaryManager {
     manager
 }
 
-/// Open the cached index, or build it (slow) if there isn't one yet. The engine
-/// is warmed before returning so the user's first keystroke is snappy.
+/// Signature of the enabled dictionary set, stored next to the index so we know
+/// whether the cached index is current (mirrors the CLI). Enabling/disabling or
+/// adding/removing a dictionary changes this and forces a rebuild.
+fn index_signature(manager: &DictionaryManager) -> String {
+    let mut lines: Vec<String> = manager
+        .dictionaries()
+        .iter()
+        .filter(|d| d.enabled)
+        .map(|d| {
+            format!(
+                "{}|{}|{}",
+                d.name(),
+                d.path.display(),
+                d.dictionary.info.word_count
+            )
+        })
+        .collect();
+    lines.sort();
+    lines.join("\n")
+}
+
+/// Open the cached index when it matches the current (on-disk) dictionary set,
+/// otherwise build it. Warmed before returning so the first keystroke is snappy.
 fn open_or_build_index() -> Result<SearchEngine, String> {
     let dir = search::default_index_dir().map_err(|e| e.to_string())?;
-    let engine = match SearchEngine::open(&dir) {
-        Ok(engine) => engine,
-        Err(_) => {
-            let mut manager = load_manager();
-            SearchEngine::build(&dir, &mut manager).map_err(|e| e.to_string())?
+    let mut manager = load_manager();
+    let signature = index_signature(&manager);
+    let cached = std::fs::read_to_string(dir.join("manifest")).ok();
+    if cached.as_deref() == Some(signature.as_str()) {
+        if let Ok(engine) = SearchEngine::open(&dir) {
+            warm_up(&engine);
+            return Ok(engine);
         }
-    };
+    }
+    build_engine(&dir, &mut manager, &signature)
+}
+
+/// Build the index from `manager`, write the manifest, and warm it.
+fn build_engine(
+    dir: &std::path::Path,
+    manager: &mut DictionaryManager,
+    signature: &str,
+) -> Result<SearchEngine, String> {
+    let engine = SearchEngine::build(dir, manager).map_err(|e| e.to_string())?;
+    let _ = std::fs::write(dir.join("manifest"), signature);
     warm_up(&engine);
     Ok(engine)
+}
+
+/// Rebuild the index from the freshly-saved config (used after the user changes
+/// the dictionary set). Loads its own manager so it can run on a worker thread.
+fn rebuild_index() -> Result<SearchEngine, String> {
+    let dir = search::default_index_dir().map_err(|e| e.to_string())?;
+    let mut manager = load_manager();
+    let signature = index_signature(&manager);
+    build_engine(&dir, &mut manager, &signature)
 }
 
 /// Run throwaway queries so the first real search doesn't pay the one-time cost
@@ -96,24 +147,30 @@ fn main() -> Result<(), slint::PlatformError> {
     let senses_model: Rc<VecModel<SharedString>> = Rc::new(VecModel::default());
     ui.set_senses(ModelRc::from(senses_model.clone()));
     let rows: Rc<RefCell<Vec<RowData>>> = Rc::new(RefCell::new(Vec::new()));
+    let dict_items: Rc<VecModel<DictRow>> = Rc::new(VecModel::default());
+    ui.set_dict_items(ModelRc::from(dict_items.clone()));
+    let scopes: Rc<VecModel<SharedString>> = Rc::new(VecModel::default());
+    ui.set_scopes(ModelRc::from(scopes.clone()));
 
-    // Scope control: "All" plus one segment per loaded dictionary. The segment
-    // index maps back to a dictionary at lookup time via `scope_filter`.
+    // Scope control ("All" + enabled dictionaries) and the settings dictionary
+    // list are both derived from the manager.
+    refresh_lists(&ui, &manager, &dict_items, &scopes);
+
+    // Appearance settings: accent swatches + the persisted theme/accent choices.
+    let swatches: Vec<Color> = ACCENT_SWATCHES
+        .iter()
+        .map(|&(r, g, b)| Color::from_rgb_u8(r, g, b))
+        .collect();
+    ui.set_accent_swatches(ModelRc::from(Rc::new(VecModel::from(swatches))));
     {
-        let mut labels: Vec<SharedString> = vec!["All".into()];
-        labels.extend(
-            manager
-                .borrow()
-                .dictionaries()
-                .iter()
-                .map(|d| pretty_dict_name(d.name()).into()),
-        );
-        ui.set_scopes(ModelRc::from(Rc::new(VecModel::from(labels))));
+        let prefs = manager.borrow().preferences().clone();
+        ui.set_theme_mode(theme_mode_index(prefs.theme_mode));
+        ui.set_accent_choice(accent_choice_index(&prefs));
     }
 
-    // Apply the OS theme (accent + light/dark, with fallbacks) without blocking
+    // Apply the theme (persisted override, else OS detection) without blocking
     // startup.
-    theme::apply_os_theme(ui.as_weak());
+    apply_appearance(&ui, &manager);
 
     // Word of the moment: one fixed entry per launch (shown immediately, before
     // the index is ready).
@@ -138,11 +195,17 @@ fn main() -> Result<(), slint::PlatformError> {
         None,
     );
 
-    // Build/open the index off the UI thread; deliver it via a channel.
+    // Build/open the index off the UI thread; deliver it via a channel. The
+    // sender is kept (wrapped in an `Rc`) so settings changes can request a
+    // rebuild on the same channel.
     let (tx, rx) = mpsc::channel::<Result<SearchEngine, String>>();
-    std::thread::spawn(move || {
-        let _ = tx.send(open_or_build_index());
-    });
+    let tx = Rc::new(tx);
+    {
+        let tx = mpsc::Sender::clone(&tx);
+        std::thread::spawn(move || {
+            let _ = tx.send(open_or_build_index());
+        });
+    }
 
     // Poll for the finished index and switch search on when it arrives.
     let index_timer = Timer::default();
@@ -280,7 +343,7 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.on_scope_changed(move |idx| {
             let ui = ui_weak.unwrap();
             // Ignore out-of-range scopes (e.g. Ctrl+5 with only two dictionaries).
-            if idx < 0 || idx as usize > manager.borrow().dictionaries().len() {
+            if idx < 0 || idx as usize > enabled_count(&manager) {
                 return;
             }
             ui.set_scope(idx);
@@ -308,14 +371,302 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // ---- settings: open / close ----
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_open_settings(move || ui_weak.unwrap().set_show_settings(true));
+    }
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_close_settings(move || ui_weak.unwrap().set_show_settings(false));
+    }
+
+    // ---- settings: enable / disable a dictionary (rebuilds the index) ----
+    {
+        let ui_weak = ui.as_weak();
+        let manager = manager.clone();
+        let dict_items = dict_items.clone();
+        let scopes = scopes.clone();
+        let tx = tx.clone();
+        ui.on_toggle_dict(move |row| {
+            let ui = ui_weak.unwrap();
+            let name = nth_dict_name(&manager, row);
+            if let Some(name) = name {
+                let now = !is_enabled(&manager, &name);
+                manager.borrow_mut().set_enabled(&name, now);
+                save_config(&manager);
+                refresh_lists(&ui, &manager, &dict_items, &scopes);
+                request_rebuild(&ui, &tx);
+            }
+        });
+    }
+
+    // ---- settings: pin a dictionary's language (no reindex needed) ----
+    {
+        let ui_weak = ui.as_weak();
+        let manager = manager.clone();
+        let dict_items = dict_items.clone();
+        let scopes = scopes.clone();
+        ui.on_set_dict_language(move |row, lang| {
+            let ui = ui_weak.unwrap();
+            if let Some(name) = nth_dict_name(&manager, row) {
+                manager
+                    .borrow_mut()
+                    .set_language(&name, index_to_lang(lang));
+                save_config(&manager);
+                refresh_lists(&ui, &manager, &dict_items, &scopes);
+            }
+        });
+    }
+
+    // ---- settings: remove a dictionary (rebuilds the index) ----
+    {
+        let ui_weak = ui.as_weak();
+        let manager = manager.clone();
+        let dict_items = dict_items.clone();
+        let scopes = scopes.clone();
+        let tx = tx.clone();
+        ui.on_remove_dict(move |row| {
+            let ui = ui_weak.unwrap();
+            if let Some(name) = nth_dict_name(&manager, row) {
+                manager.borrow_mut().remove(&name);
+                save_config(&manager);
+                refresh_lists(&ui, &manager, &dict_items, &scopes);
+                request_rebuild(&ui, &tx);
+            }
+        });
+    }
+
+    // ---- settings: add a dictionary via the native (portal) file picker ----
+    // The dialog runs on a worker thread; the chosen path comes back over a
+    // channel and is processed on the UI thread by `add_timer`.
+    let (path_tx, path_rx) = mpsc::channel::<PathBuf>();
+    {
+        ui.on_add_dict(move || {
+            let path_tx = path_tx.clone();
+            std::thread::spawn(move || {
+                if let Some(file) = rfd::FileDialog::new()
+                    .add_filter("StarDict", &["ifo"])
+                    .set_title("Add a StarDict dictionary")
+                    .pick_file()
+                {
+                    let _ = path_tx.send(file);
+                }
+            });
+        });
+    }
+    let add_timer = Timer::default();
+    {
+        let ui_weak = ui.as_weak();
+        let manager = manager.clone();
+        let dict_items = dict_items.clone();
+        let scopes = scopes.clone();
+        let tx = tx.clone();
+        add_timer.start(TimerMode::Repeated, Duration::from_millis(150), move || {
+            let Ok(path) = path_rx.try_recv() else {
+                return;
+            };
+            let ui = ui_weak.unwrap();
+            let added = manager.borrow_mut().add(&path).map(|_| ());
+            match added {
+                Ok(()) => {
+                    save_config(&manager);
+                    refresh_lists(&ui, &manager, &dict_items, &scopes);
+                    request_rebuild(&ui, &tx);
+                }
+                Err(e) => eprintln!("failed to add {}: {}", path.display(), e),
+            }
+        });
+    }
+
+    // ---- settings: theme mode + accent ----
+    {
+        let ui_weak = ui.as_weak();
+        let manager = manager.clone();
+        ui.on_set_theme_mode(move |mode| {
+            let ui = ui_weak.unwrap();
+            manager.borrow_mut().preferences_mut().theme_mode = index_to_theme_mode(mode);
+            ui.set_theme_mode(mode);
+            save_config(&manager);
+            apply_appearance(&ui, &manager);
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let manager = manager.clone();
+        ui.on_set_accent(move |choice| {
+            let ui = ui_weak.unwrap();
+            let accent = if choice <= 0 {
+                None
+            } else {
+                ACCENT_SWATCHES
+                    .get(choice as usize - 1)
+                    .map(|&(r, g, b)| format!("#{r:02x}{g:02x}{b:02x}"))
+            };
+            manager.borrow_mut().preferences_mut().accent = accent;
+            ui.set_accent_choice(choice);
+            save_config(&manager);
+            apply_appearance(&ui, &manager);
+        });
+    }
+
     let r = ui.run();
     drop(index_timer);
+    drop(add_timer);
     r
+}
+
+/// Trigger a background index rebuild, delivered over the engine channel and
+/// hot-swapped in by `index_timer`. The old index keeps serving until it lands.
+fn request_rebuild(ui: &AppWindow, tx: &Rc<mpsc::Sender<Result<SearchEngine, String>>>) {
+    ui.set_index_ready(false);
+    let tx = mpsc::Sender::clone(tx);
+    std::thread::spawn(move || {
+        let _ = tx.send(rebuild_index());
+    });
+}
+
+/// Persist the manager's dictionaries + preferences to the config file.
+fn save_config(manager: &Rc<RefCell<DictionaryManager>>) {
+    if let Err(e) = manager.borrow().config().save() {
+        eprintln!("failed to save config: {e}");
+    }
+}
+
+/// Rebuild the scope control (All + enabled dictionaries) and the settings
+/// dictionary list from the manager, resetting the active scope to All since the
+/// indices may have shifted.
+fn refresh_lists(
+    ui: &AppWindow,
+    manager: &Rc<RefCell<DictionaryManager>>,
+    dict_items: &Rc<VecModel<DictRow>>,
+    scopes: &Rc<VecModel<SharedString>>,
+) {
+    let m = manager.borrow();
+    let mut labels: Vec<SharedString> = vec!["All".into()];
+    labels.extend(
+        m.dictionaries()
+            .iter()
+            .filter(|d| d.enabled)
+            .map(|d| pretty_dict_name(d.name()).into()),
+    );
+    scopes.set_vec(labels);
+
+    let rows: Vec<DictRow> = m
+        .dictionaries()
+        .iter()
+        .map(|d| DictRow {
+            name: pretty_dict_name(d.name()).into(),
+            words: group_thousands(d.dictionary.info.word_count).into(),
+            enabled: d.enabled,
+            language: lang_to_index(d.language),
+        })
+        .collect();
+    dict_items.set_vec(rows);
+    ui.set_scope(0);
+}
+
+/// Apply the persisted appearance (theme + accent), falling back to OS detection
+/// for whatever the user left on "System"/"Auto".
+fn apply_appearance(ui: &AppWindow, manager: &Rc<RefCell<DictionaryManager>>) {
+    let prefs = manager.borrow().preferences().clone();
+    let forced_dark = match prefs.theme_mode {
+        ThemeMode::System => None,
+        ThemeMode::Light => Some(false),
+        ThemeMode::Dark => Some(true),
+    };
+    let forced_accent = prefs.accent.as_deref().and_then(theme::parse_hex);
+    theme::apply_os_theme(ui.as_weak(), forced_dark, forced_accent);
+}
+
+/// Number of enabled dictionaries (the scope control's segment count, minus All).
+fn enabled_count(manager: &Rc<RefCell<DictionaryManager>>) -> usize {
+    manager
+        .borrow()
+        .dictionaries()
+        .iter()
+        .filter(|d| d.enabled)
+        .count()
+}
+
+/// Name of the `row`-th managed dictionary (settings list order = manager order).
+fn nth_dict_name(manager: &Rc<RefCell<DictionaryManager>>, row: i32) -> Option<String> {
+    manager
+        .borrow()
+        .dictionaries()
+        .get(row.max(0) as usize)
+        .map(|d| d.name().to_string())
+}
+
+fn is_enabled(manager: &Rc<RefCell<DictionaryManager>>, name: &str) -> bool {
+    manager
+        .borrow()
+        .dictionaries()
+        .iter()
+        .any(|d| d.name() == name && d.enabled)
+}
+
+fn lang_to_index(lang: Language) -> i32 {
+    match lang {
+        Language::Auto => 0,
+        Language::English => 1,
+        Language::French => 2,
+    }
+}
+
+fn index_to_lang(index: i32) -> Language {
+    match index {
+        1 => Language::English,
+        2 => Language::French,
+        _ => Language::Auto,
+    }
+}
+
+fn theme_mode_index(mode: ThemeMode) -> i32 {
+    match mode {
+        ThemeMode::System => 0,
+        ThemeMode::Light => 1,
+        ThemeMode::Dark => 2,
+    }
+}
+
+fn index_to_theme_mode(index: i32) -> ThemeMode {
+    match index {
+        1 => ThemeMode::Light,
+        2 => ThemeMode::Dark,
+        _ => ThemeMode::System,
+    }
+}
+
+/// Which accent chip is active: 0 = Auto (follow OS), else the matching swatch.
+fn accent_choice_index(prefs: &Preferences) -> i32 {
+    let Some(rgb) = prefs.accent.as_deref().and_then(theme::parse_hex) else {
+        return 0;
+    };
+    ACCENT_SWATCHES
+        .iter()
+        .position(|&s| s == rgb)
+        .map(|i| i as i32 + 1)
+        .unwrap_or(0)
+}
+
+/// Format a word count with thousands separators (e.g. `174222` → `174,222`).
+fn group_thousands(n: usize) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
 }
 
 /// Map a scope index to the dictionary it restricts results to: index 0 ("All")
 /// and any out-of-range index mean no restriction; index `n` selects the
-/// `n-1`th loaded dictionary.
+/// `n-1`th *enabled* dictionary (the scope control lists only enabled ones).
 fn scope_filter(scope: i32, manager: &Rc<RefCell<DictionaryManager>>) -> Option<String> {
     if scope <= 0 {
         return None;
@@ -323,7 +674,9 @@ fn scope_filter(scope: i32, manager: &Rc<RefCell<DictionaryManager>>) -> Option<
     manager
         .borrow()
         .dictionaries()
-        .get(scope as usize - 1)
+        .iter()
+        .filter(|d| d.enabled)
+        .nth(scope as usize - 1)
         .map(|d| d.name().to_string())
 }
 

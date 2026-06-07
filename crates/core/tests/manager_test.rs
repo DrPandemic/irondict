@@ -86,10 +86,8 @@ fn remove_dictionary() {
 #[test]
 fn from_config_loads_listed_dictionaries() {
     let config = Config {
-        dictionaries: vec![DictionaryConfig {
-            path: mini_path(),
-            enabled: true,
-        }],
+        dictionaries: vec![DictionaryConfig::new(mini_path())],
+        ..Default::default()
     };
     let (mut mgr, errors) = DictionaryManager::from_config(&config);
     assert!(errors.is_empty());
@@ -103,15 +101,10 @@ fn from_config_loads_listed_dictionaries() {
 fn from_config_collects_load_errors_for_missing_files() {
     let config = Config {
         dictionaries: vec![
-            DictionaryConfig {
-                path: mini_path(),
-                enabled: true,
-            },
-            DictionaryConfig {
-                path: PathBuf::from("/no/such/dictionary.ifo"),
-                enabled: true,
-            },
+            DictionaryConfig::new(mini_path()),
+            DictionaryConfig::new(PathBuf::from("/no/such/dictionary.ifo")),
         ],
+        ..Default::default()
     };
     let (mgr, errors) = DictionaryManager::from_config(&config);
     assert_eq!(mgr.dictionaries().len(), 1);

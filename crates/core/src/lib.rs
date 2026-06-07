@@ -4,7 +4,7 @@ pub mod model;
 pub mod search;
 pub mod stardict;
 
-pub use config::{Config, DictionaryConfig};
+pub use config::{Config, DictionaryConfig, Language, Preferences, ThemeMode};
 pub use manager::{
     bundled_gcide_path, DictLoadError, DictionaryManager, LookupResult, ManagedDictionary,
 };
