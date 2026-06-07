@@ -29,6 +29,19 @@ struct DefBlock {
     text: string,
 }
 
+// One conjugated form (e.g. "past" / "went", or "je" / "parle").
+struct ConjForm {
+    label: string,
+    text: string,
+}
+
+// One mood/tense block of a conjugation (English: "Principal parts"; French:
+// "Indicatif présent", …).
+struct ConjSection {
+    label: string,
+    forms: [ConjForm],
+}
+
 // Read-only text that the user can still select and copy (plain Text can't be
 // selected in Slint).
 component SelectableText inherits TextInput {
@@ -82,6 +95,11 @@ export component AppWindow inherits Window {
     in property <string> def-pos;          // expanded part of speech
     in property <[DefBlock]> def-blocks;   // definition body (paragraphs / senses)
     in property <string> def-source;
+
+    // conjugation table (empty = the entry isn't a recognized verb). Shown only
+    // on demand, in an overlay, via the button on a verb's page.
+    in property <[ConjSection]> conjugation;
+    in-out property <bool> show-conjugation: false;
 
     // ---- settings page ----
     in-out property <bool> show-settings: false;
@@ -331,6 +349,42 @@ export component AppWindow inherits Window {
                             text: "· " + def-pron;
                             font-size: 13px;
                             color: text-secondary;
+                        }
+                    }
+
+                    // conjugation button (verbs only): opens the full tables in
+                    // an overlay so they never crowd out the definition body.
+                    HorizontalLayout {
+                        alignment: start;
+                        visible: conjugation.length > 0;
+                        Rectangle {
+                            height: 30px;
+                            horizontal-stretch: 0;
+                            border-radius: 8px;
+                            background: conj-btn.has-hover ? accent : accent-tint;
+                            border-width: 1px;
+                            border-color: accent;
+                            conj-btn := TouchArea {
+                                clicked => { root.show-conjugation = true; }
+                            }
+                            HorizontalLayout {
+                                padding-left: 14px;
+                                padding-right: 14px;
+                                spacing: 6px;
+                                Text {
+                                    text: "Conjugation";
+                                    vertical-alignment: center;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    color: conj-btn.has-hover ? #ffffff : accent;
+                                }
+                                Text {
+                                    text: "▸";
+                                    vertical-alignment: center;
+                                    font-size: 13px;
+                                    color: conj-btn.has-hover ? #ffffff : accent;
+                                }
+                            }
                         }
                     }
 
@@ -606,6 +660,94 @@ export component AppWindow inherits Window {
                             border-color: text-primary;
                             TouchArea {
                                 clicked => { root.set-accent(si + 1); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ===================== conjugation overlay =====================
+    if show-conjugation : Rectangle {
+        // dimmed backdrop; clicking it closes the panel
+        background: #00000080;
+        TouchArea {
+            clicked => { root.show-conjugation = false; }
+        }
+
+        // panel (centered)
+        Rectangle {
+            width: min(560px, root.width - 80px);
+            height: min(640px, root.height - 80px);
+            background: bg;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: divider;
+            // absorb clicks so they don't fall through to the backdrop
+            TouchArea {}
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 14px;
+
+                // header
+                HorizontalLayout {
+                    Text {
+                        text: "Conjugation — " + def-headword;
+                        font-size: 20px;
+                        font-weight: 700;
+                        color: text-primary;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 6px;
+                        background: conj-close.has-hover ? divider : transparent;
+                        conj-close := TouchArea {
+                            clicked => { root.show-conjugation = false; }
+                        }
+                        Text {
+                            text: "✕";
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            color: text-secondary;
+                        }
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 14px;
+                        alignment: start;
+                        for sec in conjugation: VerticalLayout {
+                            spacing: 4px;
+                            Text {
+                                text: sec.label;
+                                font-size: 12px;
+                                font-weight: 600;
+                                color: accent;
+                            }
+                            for f in sec.forms: HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                Text {
+                                    text: f.label;
+                                    font-size: 13px;
+                                    color: text-secondary;
+                                    width: 150px;
+                                    overflow: elide;
+                                }
+                                SelectableText {
+                                    text: f.text;
+                                    font-size: 14px;
+                                    font-weight: 500;
+                                    color: text-primary;
+                                    horizontal-stretch: 1;
+                                }
                             }
                         }
                     }

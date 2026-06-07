@@ -16,8 +16,8 @@ use regex::Regex;
 use slint::{Color, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use irondict_core::{
-    bundled_gcide_path, search, Config, DictionaryConfig, DictionaryManager, Language, Preferences,
-    SearchEngine, SearchMode, ThemeMode,
+    bundled_gcide_path, search, Config, ConjugatorRegistry, DictionaryConfig, DictionaryManager,
+    Language, Preferences, SearchEngine, SearchMode, ThemeMode,
 };
 
 /// Preset accent swatches offered in the settings page, in display order. Index
@@ -178,20 +178,14 @@ fn main() -> Result<(), slint::PlatformError> {
     // startup.
     apply_appearance(&ui, &manager);
 
-    // Word of the moment: one fixed entry per launch (shown immediately, before
-    // the index is ready).
-    let wotm = {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos() as usize)
-            .unwrap_or(0);
-        manager
-            .borrow()
-            .dictionaries()
-            .first()
-            .and_then(|d| d.dictionary.nth_headword(seed))
-            .unwrap_or_else(|| "irondict".to_string())
-    };
+    // Word of the moment: one fixed seed per launch, but the actual word is drawn
+    // from whichever dictionary the active scope selects (so it follows the chosen
+    // dictionary). Shown immediately, before the index is ready.
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize)
+        .unwrap_or(0);
+    let wotm = word_of_the_moment(&manager, ui.get_scope(), seed);
     show_word(
         &ui,
         &manager,
@@ -261,7 +255,6 @@ fn main() -> Result<(), slint::PlatformError> {
         let results_model = results_model.clone();
         let blocks_model = blocks_model.clone();
         let rows = rows.clone();
-        let wotm = wotm.clone();
         // Debounce: keep typing responsive by deferring the (render-heavy) search
         // until the user pauses, instead of running it on every keystroke.
         let debounce = Rc::new(Timer::default());
@@ -273,6 +266,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 results_model.set_vec(Vec::new());
                 rows.borrow_mut().clear();
                 ui.set_selected_index(-1);
+                let wotm = word_of_the_moment(&manager, ui.get_scope(), seed);
                 show_word(
                     &ui,
                     &manager,
@@ -344,7 +338,6 @@ fn main() -> Result<(), slint::PlatformError> {
         let results_model = results_model.clone();
         let blocks_model = blocks_model.clone();
         let rows = rows.clone();
-        let wotm = wotm.clone();
         ui.on_scope_changed(move |idx| {
             let ui = ui_weak.unwrap();
             // Ignore out-of-range scopes (e.g. Ctrl+5 with only two dictionaries).
@@ -358,6 +351,8 @@ fn main() -> Result<(), slint::PlatformError> {
             save_config(&manager);
             let q = ui.get_query();
             if q.trim().is_empty() {
+                // The word of the moment follows the newly-selected dictionary.
+                let wotm = word_of_the_moment(&manager, idx, seed);
                 show_word(
                     &ui,
                     &manager,
@@ -673,6 +668,25 @@ fn group_thousands(n: usize) -> String {
     out
 }
 
+/// Pick the "word of the moment" for the active `scope`: a stable-per-launch
+/// (`seed`-chosen) headword drawn from the dictionary that scope selects. Index 0
+/// ("All") and any out-of-range index fall back to the first enabled dictionary.
+fn word_of_the_moment(
+    manager: &Rc<RefCell<DictionaryManager>>,
+    scope: i32,
+    seed: usize,
+) -> String {
+    let m = manager.borrow();
+    let mut enabled = m.dictionaries().iter().filter(|d| d.enabled);
+    let dict = if scope <= 0 {
+        enabled.next()
+    } else {
+        enabled.nth(scope as usize - 1)
+    };
+    dict.and_then(|d| d.dictionary.nth_headword(seed))
+        .unwrap_or_else(|| "irondict".to_string())
+}
+
 /// Map a scope index to the dictionary it restricts results to: index 0 ("All")
 /// and any out-of-range index mean no restriction; index `n` selects the
 /// `n-1`th *enabled* dictionary (the scope control lists only enabled ones).
@@ -726,6 +740,7 @@ fn show_message(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, title: &s
         text: body.into(),
     }]);
     ui.set_def_source("".into());
+    clear_conjugation(ui);
 }
 
 /// Run a query through the engine and update the list + definition pane.
@@ -828,7 +843,7 @@ fn show_word(
 
     ui.set_section_label(label.into());
     ui.set_def_headword(headword.into());
-    ui.set_def_source(source.into());
+    ui.set_def_source(source.clone().into());
 
     let blocks: Vec<DefBlock> = if html {
         // HTML entry (e.g. Petit Robert): no GCIDE pos/pron. Convert to plain-text
@@ -865,6 +880,63 @@ fn show_word(
         }
     };
     blocks_model.set_vec(blocks);
+    set_conjugation(ui, manager, headword, &raw, &source);
+}
+
+/// Compute `headword`'s conjugation from its definition (and the source
+/// dictionary's pinned language) and push it to the UI. Clears the block when the
+/// word isn't a recognized verb.
+fn set_conjugation(
+    ui: &AppWindow,
+    manager: &Rc<RefCell<DictionaryManager>>,
+    headword: &str,
+    raw: &str,
+    source: &str,
+) {
+    let language = {
+        let m = manager.borrow();
+        m.dictionaries()
+            .iter()
+            .find(|d| d.name() == source)
+            .map(|d| d.language)
+            .unwrap_or(Language::Auto)
+    };
+
+    let def = (!raw.is_empty()).then_some(raw);
+    let Some(conj) = ConjugatorRegistry::new().conjugate(headword, def, language) else {
+        clear_conjugation(ui);
+        return;
+    };
+
+    let sections: Vec<ConjSection> = conj
+        .sections
+        .iter()
+        .map(|s| {
+            let forms: Vec<ConjForm> = s
+                .forms
+                .iter()
+                .map(|f| ConjForm {
+                    label: f.label.clone().into(),
+                    text: f.text.clone().into(),
+                })
+                .collect();
+            ConjSection {
+                label: s.label.clone().into(),
+                forms: ModelRc::from(Rc::new(VecModel::from(forms))),
+            }
+        })
+        .collect();
+
+    // The table starts hidden; the page only shows a button to open it.
+    ui.set_conjugation(ModelRc::from(Rc::new(VecModel::from(sections))));
+    ui.set_show_conjugation(false);
+}
+
+fn clear_conjugation(ui: &AppWindow) {
+    ui.set_conjugation(ModelRc::from(Rc::new(VecModel::from(
+        Vec::<ConjSection>::new(),
+    ))));
+    ui.set_show_conjugation(false);
 }
 
 /// Look up `headword` and return (joined raw definition text, source name,

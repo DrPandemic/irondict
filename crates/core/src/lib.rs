@@ -1,10 +1,15 @@
 pub mod config;
+pub mod conjugation;
 pub mod manager;
 pub mod model;
 pub mod search;
 pub mod stardict;
 
 pub use config::{Config, DictionaryConfig, Language, Preferences, ThemeMode};
+pub use conjugation::{
+    ConjForm, ConjSection, Conjugation, Conjugator, ConjugatorRegistry, EnglishConjugator,
+    FrenchConjugator,
+};
 pub use manager::{
     bundled_gcide_path, DictLoadError, DictionaryManager, LookupResult, ManagedDictionary,
 };

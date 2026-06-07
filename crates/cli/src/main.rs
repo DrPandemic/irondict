@@ -1,11 +1,12 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use irondict_core::{
-    bundled_gcide_path, search, Config, DictionaryConfig, DictionaryManager, SearchEngine,
-    SearchMode,
+    bundled_gcide_path, search, Config, Conjugation, ConjugatorRegistry, DictionaryConfig,
+    DictionaryManager, Language, SearchEngine, SearchMode,
 };
 
 /// Multi-dictionary lookup over StarDict dictionaries.
@@ -33,6 +34,14 @@ enum Command {
         /// Maximum number of results to return.
         #[arg(long, default_value_t = 20)]
         limit: usize,
+    },
+    /// Conjugate a verb, sourcing forms from the loaded dictionaries.
+    Conjugate {
+        /// The verb to conjugate.
+        verb: String,
+        /// Force a language instead of auto-detecting from the dictionaries.
+        #[arg(long, value_enum)]
+        lang: Option<Lang>,
     },
     /// Add a StarDict dictionary (path to its `.ifo` file).
     Add {
@@ -82,10 +91,27 @@ impl From<Mode> for SearchMode {
     }
 }
 
+/// CLI mirror of the conjugation [`Language`] choices.
+#[derive(Clone, Copy, ValueEnum)]
+enum Lang {
+    En,
+    Fr,
+}
+
+impl From<Lang> for Language {
+    fn from(lang: Lang) -> Self {
+        match lang {
+            Lang::En => Language::English,
+            Lang::Fr => Language::French,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Lookup { word } => lookup(&word),
+        Command::Conjugate { verb, lang } => conjugate(&verb, lang.map(Into::into)),
         Command::Search { query, mode, limit } => run_search(&query, mode.into(), limit),
         Command::Add { path } => add(path),
         Command::List => list(),
@@ -142,6 +168,82 @@ fn lookup(word: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Conjugate `verb`, drawing forms from the loaded dictionaries. When `lang` is
+/// given it forces that backend; otherwise routing follows each dictionary's
+/// pinned language (default Auto, which detects from the entry).
+fn conjugate(verb: &str, lang: Option<Language>) -> Result<()> {
+    let mut manager = load_manager()?;
+    let results = manager.lookup(verb).context("looking up verb")?;
+    // Map each source dictionary to its pinned language (borrow after lookup).
+    let langs: HashMap<String, Language> = manager
+        .dictionaries()
+        .iter()
+        .map(|d| (d.name().to_string(), d.language))
+        .collect();
+
+    let definitions: Vec<(Language, String)> = results
+        .iter()
+        .map(|r| {
+            let lang = langs.get(&r.dictionary).copied().unwrap_or(Language::Auto);
+            let text: String = r
+                .entries
+                .iter()
+                .flat_map(|e| e.segments.iter())
+                .map(|s| s.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            (lang, text)
+        })
+        .collect();
+
+    let reg = ConjugatorRegistry::new();
+    let conjugation = match lang {
+        // Forced language: parse from any available definition (or none).
+        Some(forced) => {
+            let def = definitions.first().map(|(_, t)| t.as_str());
+            reg.conjugate(verb, def, forced)
+        }
+        // Auto: try each dictionary's definition under its pinned language and
+        // accept the first recognized verb.
+        None => definitions
+            .iter()
+            .find_map(|(dl, text)| reg.conjugate(verb, Some(text), *dl)),
+    };
+
+    match conjugation {
+        Some(c) => {
+            print_conjugation(&c);
+            Ok(())
+        }
+        None => {
+            println!("No conjugation found for \"{verb}\".");
+            Ok(())
+        }
+    }
+}
+
+fn print_conjugation(c: &Conjugation) {
+    let lang = match c.language {
+        Language::English => "English",
+        Language::French => "French",
+        Language::Auto => "",
+    };
+    println!("{} ({lang})", c.infinitive);
+    let multi = c.sections.len() > 1;
+    for sec in &c.sections {
+        if multi || !sec.label.is_empty() {
+            println!("\n{}", sec.label);
+        }
+        for f in &sec.forms {
+            if f.label.is_empty() {
+                println!("  {}", f.text);
+            } else {
+                println!("  {:<22} {}", f.label, f.text);
+            }
+        }
+    }
 }
 
 /// The signature of the enabled dictionary set, written next to the index so we
