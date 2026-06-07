@@ -37,6 +37,22 @@ impl Dictionary {
         Ok(results.map(|defs| defs.into_iter().map(to_entry).collect()))
     }
 
+    /// The headword at position `n` (modulo the dictionary size) in the index's
+    /// internal order. Used to pick a "word of the moment" without materializing
+    /// every entry. Returns `None` only for an empty dictionary.
+    pub fn nth_headword(&self, n: usize) -> Option<String> {
+        let len = self.inner.idx.items.len();
+        if len == 0 {
+            return None;
+        }
+        self.inner
+            .idx
+            .items
+            .values()
+            .nth(n % len)
+            .map(|e| e.word.clone())
+    }
+
     /// Iterate every entry in the dictionary, calling `f` with each headword and
     /// its full definition. Used to feed the search index (Phase 5).
     ///

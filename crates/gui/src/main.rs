@@ -1,100 +1,83 @@
-// Phase 6 step 1: a static, interactive visual prototype of the "toolbar layout".
-// Sample data only — the real DictionaryManager + SearchEngine wiring comes next.
+// Phase 6 step 2: the "toolbar layout" wired to the real backend
+// (DictionaryManager + SearchEngine over the bundled GCIDE).
+//
+// The search index takes a few seconds to build on first run, so it is built on
+// a worker thread; the window appears immediately (showing the word of the
+// moment) and search becomes live once the index is ready.
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::mpsc;
+use std::time::Duration;
 
-use slint::{ModelRc, VecModel};
+use slint::{ModelRc, Timer, TimerMode, VecModel};
+
+use irondict_core::{
+    bundled_gcide_path, search, Config, DictionaryConfig, DictionaryManager, SearchEngine,
+    SearchMode,
+};
 
 slint::include_modules!();
 
-/// A sample dictionary entry used to populate the prototype.
-struct Entry {
-    headword: &'static str,
-    pos: &'static str,
-    snippet: &'static str,
-    body: &'static str,
+/// Backing data for a results row, so a click can resolve the full definition.
+struct RowData {
+    headword: String,
 }
 
-const SOURCE: &str = "GCIDE";
-
-fn sample_entries() -> Vec<Entry> {
-    vec![
-        Entry {
-            headword: "Petrichor",
-            pos: "noun",
-            snippet: "a pleasant, earthy smell after rain",
-            body: "The pleasant, earthy scent produced when rain falls on dry soil \
-                   after a warm, dry spell.",
-        },
-        Entry {
-            headword: "Dictionary",
-            pos: "noun",
-            snippet: "a book of words and their meanings",
-            body: "A book containing the words of a language, alphabetically arranged, \
-                   with explanations of their meanings, etymologies, and pronunciations.",
-        },
-        Entry {
-            headword: "Diction",
-            pos: "noun",
-            snippet: "manner of word choice and expression",
-            body: "Choice of words and the manner of expression in speech or writing.",
-        },
-        Entry {
-            headword: "Dictionaries",
-            pos: "noun",
-            snippet: "plural of dictionary",
-            body: "Plural of dictionary.",
-        },
-        Entry {
-            headword: "Lexicon",
-            pos: "noun",
-            snippet: "the vocabulary of a language",
-            body: "The vocabulary of a person, language, or branch of knowledge.",
-        },
-        Entry {
-            headword: "Lexicography",
-            pos: "noun",
-            snippet: "the art of compiling dictionaries",
-            body: "The practice and principles of compiling dictionaries.",
-        },
-        Entry {
-            headword: "Etymology",
-            pos: "noun",
-            snippet: "the origin and history of words",
-            body: "The study of the origin of words and the way their meanings have \
-                   changed throughout history.",
-        },
-        Entry {
-            headword: "Vocabulary",
-            pos: "noun",
-            snippet: "the words used in a language",
-            body: "The body of words used in a particular language, or known to an \
-                   individual person.",
-        },
-        Entry {
-            headword: "Glossary",
-            pos: "noun",
-            snippet: "a list of terms with definitions",
-            body: "An alphabetical list of terms in a particular domain with their \
-                   definitions.",
-        },
-        Entry {
-            headword: "Thesaurus",
-            pos: "noun",
-            snippet: "a book of synonyms",
-            body: "A reference work that lists words grouped together according to \
-                   similarity of meaning.",
-        },
-    ]
+/// Load the manager from the persisted config, seeding bundled GCIDE on first
+/// run (mirrors the CLI). Per-dictionary load failures are warnings, not fatal.
+fn load_manager() -> DictionaryManager {
+    let config = match Config::default_path() {
+        Ok(path) => {
+            if !path.exists() {
+                let mut c = Config::default();
+                c.dictionaries.push(DictionaryConfig {
+                    path: bundled_gcide_path(),
+                    enabled: true,
+                });
+                let _ = c.save_to(&path);
+                c
+            } else {
+                Config::load_from(&path).unwrap_or_default()
+            }
+        }
+        Err(_) => {
+            let mut c = Config::default();
+            c.dictionaries.push(DictionaryConfig {
+                path: bundled_gcide_path(),
+                enabled: true,
+            });
+            c
+        }
+    };
+    let (manager, errors) = DictionaryManager::from_config(&config);
+    for e in errors {
+        eprintln!("warning: failed to load {}: {}", e.path.display(), e.error);
+    }
+    manager
 }
 
-fn show_entry(ui: &AppWindow, e: &Entry, label: &str) {
-    ui.set_section_label(label.into());
-    ui.set_def_headword(e.headword.into());
-    ui.set_def_pos(e.pos.into());
-    ui.set_def_body(e.body.into());
-    ui.set_def_source(SOURCE.into());
+/// Open the cached index, or build it (slow) if there isn't one yet. The engine
+/// is warmed before returning so the user's first keystroke is snappy.
+fn open_or_build_index() -> Result<SearchEngine, String> {
+    let dir = search::default_index_dir().map_err(|e| e.to_string())?;
+    let engine = match SearchEngine::open(&dir) {
+        Ok(engine) => engine,
+        Err(_) => {
+            let mut manager = load_manager();
+            SearchEngine::build(&dir, &mut manager).map_err(|e| e.to_string())?
+        }
+    };
+    warm_up(&engine);
+    Ok(engine)
+}
+
+/// Run throwaway queries so the first real search doesn't pay the one-time cost
+/// of mmapping the term dictionary, opening segment/store readers, and building
+/// the fuzzy automaton. Runs on the worker thread, off the UI thread.
+fn warm_up(engine: &SearchEngine) {
+    let _ = engine.search("a", SearchMode::Prefix, 80);
+    let _ = engine.search("warmup", SearchMode::Fuzzy, 40);
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -102,112 +85,121 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_accent(slint::Color::from_rgb_u8(0x4f, 0x46, 0xe5));
     ui.set_accent_tint(slint::Color::from_rgb_u8(0xee, 0xf0, 0xfd));
 
-    let entries = Rc::new(sample_entries());
+    let manager = Rc::new(RefCell::new(load_manager()));
+    let engine: Rc<RefCell<Option<SearchEngine>>> = Rc::new(RefCell::new(None));
     let results_model: Rc<VecModel<ResultItem>> = Rc::new(VecModel::default());
     ui.set_results(ModelRc::from(results_model.clone()));
-    // Maps a results-row index back to its entry index, so selection can show the
-    // full definition.
-    let row_to_entry: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
+    let rows: Rc<RefCell<Vec<RowData>>> = Rc::new(RefCell::new(Vec::new()));
 
-    // Fill the results column with every entry (the idle/browse state).
-    let populate_all = {
-        let entries = entries.clone();
-        let results_model = results_model.clone();
-        let row_to_entry = row_to_entry.clone();
-        move || {
-            let rows: Vec<ResultItem> = entries
-                .iter()
-                .map(|e| ResultItem {
-                    headword: e.headword.into(),
-                    snippet: e.snippet.into(),
-                    source: SOURCE.into(),
-                })
-                .collect();
-            results_model.set_vec(rows);
-            *row_to_entry.borrow_mut() = (0..entries.len()).collect();
-        }
+    // Word of the moment: one fixed entry per launch (shown immediately, before
+    // the index is ready).
+    let wotm = {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as usize)
+            .unwrap_or(0);
+        manager
+            .borrow()
+            .dictionaries()
+            .first()
+            .and_then(|d| d.dictionary.nth_headword(seed))
+            .unwrap_or_else(|| "irondict".to_string())
     };
+    show_word(&ui, &manager, &wotm, "WORD OF THE MOMENT");
 
-    // "Word of the moment": one fixed entry chosen per launch; it does not change
-    // when the search is cleared.
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as usize)
-        .unwrap_or(0);
-    let wotm_index = seed % entries.len();
+    // Build/open the index off the UI thread; deliver it via a channel.
+    let (tx, rx) = mpsc::channel::<Result<SearchEngine, String>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(open_or_build_index());
+    });
 
-    // Initial state: list shows everything, nothing highlighted, word of the
-    // moment in the definition pane.
-    populate_all();
-    ui.set_selected_index(-1);
-    show_entry(&ui, &entries[wotm_index], "WORD OF THE MOMENT");
-
-    // Live filter as the user types.
+    // Poll for the finished index and switch search on when it arrives.
+    let index_timer = Timer::default();
     {
         let ui_weak = ui.as_weak();
-        let entries = entries.clone();
+        let manager = manager.clone();
+        let engine = engine.clone();
         let results_model = results_model.clone();
-        let row_to_entry = row_to_entry.clone();
-        let populate_all = populate_all.clone();
-        ui.on_query_changed(move |q| {
-            let ui = ui_weak.unwrap();
-            let needle = q.trim().to_lowercase();
+        let rows = rows.clone();
+        index_timer.start(TimerMode::Repeated, Duration::from_millis(120), move || {
+            match rx.try_recv() {
+                Ok(Ok(e)) => {
+                    let ui = ui_weak.unwrap();
+                    *engine.borrow_mut() = Some(e);
+                    ui.set_index_ready(true);
+                    let q = ui.get_query();
+                    if !q.trim().is_empty() {
+                        run_search(&ui, &manager, &engine, &results_model, &rows, &q);
+                    }
+                }
+                Ok(Err(msg)) => {
+                    let ui = ui_weak.unwrap();
+                    ui.set_def_headword("Couldn't build index".into());
+                    ui.set_def_body(msg.into());
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {}
+            }
+        });
+    }
 
-            if needle.is_empty() {
-                // Back to the browse state with the same word of the moment.
+    // Live search as the user types.
+    {
+        let ui_weak = ui.as_weak();
+        let manager = manager.clone();
+        let engine = engine.clone();
+        let results_model = results_model.clone();
+        let rows = rows.clone();
+        let wotm = wotm.clone();
+        // Debounce: keep typing responsive by deferring the (render-heavy) search
+        // until the user pauses, instead of running it on every keystroke.
+        let debounce = Rc::new(Timer::default());
+        ui.on_query_changed(move |q| {
+            if q.trim().is_empty() {
+                let ui = ui_weak.unwrap();
+                debounce.stop();
                 ui.set_searching(false);
-                populate_all();
+                results_model.set_vec(Vec::new());
+                rows.borrow_mut().clear();
                 ui.set_selected_index(-1);
-                show_entry(&ui, &entries[wotm_index], "WORD OF THE MOMENT");
+                show_word(&ui, &manager, &wotm, "WORD OF THE MOMENT");
                 return;
             }
-
-            let mut rows = Vec::new();
-            let mut map = Vec::new();
-            for (i, e) in entries.iter().enumerate() {
-                if e.headword.to_lowercase().contains(&needle) {
-                    rows.push(ResultItem {
-                        headword: e.headword.into(),
-                        snippet: e.snippet.into(),
-                        source: SOURCE.into(),
-                    });
-                    map.push(i);
-                }
-            }
-
-            ui.set_searching(true);
-            results_model.set_vec(rows);
-            *row_to_entry.borrow_mut() = map;
-
-            if let Some(&first) = row_to_entry.borrow().first() {
-                ui.set_selected_index(0);
-                show_entry(&ui, &entries[first], "");
-            } else {
-                ui.set_selected_index(-1);
-                ui.set_section_label("".into());
-                ui.set_def_headword("No results".into());
-                ui.set_def_pos("".into());
-                ui.set_def_body(format!("Nothing matches \u{201c}{}\u{201d}.", q).into());
-                ui.set_def_source("".into());
-            }
+            let ui_weak = ui_weak.clone();
+            let manager = manager.clone();
+            let engine = engine.clone();
+            let results_model = results_model.clone();
+            let rows = rows.clone();
+            debounce.start(
+                TimerMode::SingleShot,
+                Duration::from_millis(140),
+                move || {
+                    let ui = ui_weak.unwrap();
+                    run_search(&ui, &manager, &engine, &results_model, &rows, &ui.get_query());
+                },
+            );
         });
     }
 
     // Click a result to show its definition.
     {
         let ui_weak = ui.as_weak();
-        let entries = entries.clone();
-        let row_to_entry = row_to_entry.clone();
+        let manager = manager.clone();
+        let rows = rows.clone();
         ui.on_select(move |row| {
             let ui = ui_weak.unwrap();
-            if let Some(&entry_idx) = row_to_entry.borrow().get(row.max(0) as usize) {
+            let headword = rows
+                .borrow()
+                .get(row.max(0) as usize)
+                .map(|r| r.headword.clone());
+            if let Some(headword) = headword {
                 ui.set_selected_index(row);
-                show_entry(&ui, &entries[entry_idx], "");
+                show_word(&ui, &manager, &headword, "");
             }
         });
     }
 
-    // Scope toggle (cosmetic in the prototype).
+    // Scope toggle (cosmetic until multi-dictionary support lands).
     {
         let ui_weak = ui.as_weak();
         ui.on_scope_changed(move |idx| {
@@ -215,5 +207,151 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    ui.run()
+    let r = ui.run();
+    drop(index_timer);
+    r
+}
+
+/// Run a query through the engine and update the list + definition pane.
+fn run_search(
+    ui: &AppWindow,
+    manager: &Rc<RefCell<DictionaryManager>>,
+    engine: &Rc<RefCell<Option<SearchEngine>>>,
+    results_model: &Rc<VecModel<ResultItem>>,
+    rows: &Rc<RefCell<Vec<RowData>>>,
+    query: &str,
+) {
+    let needle = query.trim();
+    let eng_ref = engine.borrow();
+    let Some(eng) = eng_ref.as_ref() else {
+        // Index still building.
+        ui.set_section_label("".into());
+        ui.set_def_headword("Preparing dictionary…".into());
+        ui.set_def_pos("".into());
+        ui.set_def_body("Building the search index — one moment.".into());
+        ui.set_def_source("".into());
+        return;
+    };
+
+    // Prefix (autocomplete) first; fall back to fuzzy for typos.
+    let mut hits = eng
+        .search(needle, SearchMode::Prefix, 80)
+        .unwrap_or_default();
+    if hits.is_empty() {
+        // Fuzzy hits are already ranked by edit distance — keep that order.
+        hits = eng.search(needle, SearchMode::Fuzzy, 40).unwrap_or_default();
+    } else {
+        // Prefix hits are unranked; show the shortest (closest) completion first.
+        hits.sort_by(|a, b| {
+            a.headword
+                .chars()
+                .count()
+                .cmp(&b.headword.chars().count())
+                .then_with(|| a.headword.to_lowercase().cmp(&b.headword.to_lowercase()))
+        });
+    }
+    hits.truncate(40);
+
+    let mut items = Vec::with_capacity(hits.len());
+    let mut rd = Vec::with_capacity(hits.len());
+    for h in &hits {
+        items.push(ResultItem {
+            headword: h.headword.clone().into(),
+            snippet: make_snippet(&h.snippet).into(),
+            source: h.dictionary.clone().into(),
+        });
+        rd.push(RowData {
+            headword: h.headword.clone(),
+        });
+    }
+    results_model.set_vec(items);
+    *rows.borrow_mut() = rd;
+    ui.set_searching(true);
+
+    if let Some(first) = hits.first() {
+        ui.set_selected_index(0);
+        show_word(ui, manager, &first.headword, "");
+    } else {
+        ui.set_selected_index(-1);
+        ui.set_section_label("".into());
+        ui.set_def_headword("No results".into());
+        ui.set_def_pos("".into());
+        ui.set_def_body(format!("Nothing matches \u{201c}{needle}\u{201d}.").into());
+        ui.set_def_source("".into());
+    }
+}
+
+/// Resolve `headword` to its full definition and show it in the definition pane.
+fn show_word(
+    ui: &AppWindow,
+    manager: &Rc<RefCell<DictionaryManager>>,
+    headword: &str,
+    label: &str,
+) {
+    let (body, source) = {
+        let mut m = manager.borrow_mut();
+        match m.lookup(headword) {
+            Ok(results) if !results.is_empty() => {
+                let source = results[0].dictionary.clone();
+                let mut parts = Vec::new();
+                for r in &results {
+                    for e in &r.entries {
+                        parts.push(e.segments.iter().map(|s| s.text.as_str()).collect::<String>());
+                    }
+                }
+                (clean_body(&parts.join("\n\n")), source)
+            }
+            _ => (String::new(), String::new()),
+        }
+    };
+    ui.set_section_label(label.into());
+    ui.set_def_headword(headword.into());
+    ui.set_def_pos("".into());
+    ui.set_def_body(body.into());
+    ui.set_def_source(source.into());
+}
+
+/// Drop StarDict `{cross-reference}` braces (keep the inner text).
+fn strip_braces(s: &str) -> String {
+    s.chars().filter(|&c| c != '{' && c != '}').collect()
+}
+
+/// Light cleanup of GCIDE definition text for display: drop the editorial
+/// `[1913 Webster]` / `[PJC]` marker lines, strip cross-ref braces, and collapse
+/// runs of blank lines. (Proper rich rendering is Phase 7.)
+fn clean_body(raw: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for line in raw.lines() {
+        let t = line.trim();
+        if t == "[1913 Webster]"
+            || t == "[PJC]"
+            || t.starts_with("[Webster 1913")
+            || t.starts_with("[Century")
+        {
+            continue;
+        }
+        out.push(line.trim_end().to_string());
+    }
+    let mut joined = strip_braces(&out.join("\n"));
+    while joined.contains("\n\n\n") {
+        joined = joined.replace("\n\n\n", "\n\n");
+    }
+    joined.trim().to_string()
+}
+
+/// A one-line preview for the results list: prefer the first numbered sense.
+fn make_snippet(raw: &str) -> String {
+    let flat: String = strip_braces(raw)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let start = flat.find(" 1. ").map(|i| i + 4).unwrap_or(0);
+    let tail = &flat[start..];
+    let mut chars = tail.chars();
+    let head: String = chars.by_ref().take(90).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
 }

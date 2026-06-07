@@ -24,14 +24,19 @@ pub enum SearchMode {
     FullText,
 }
 
-/// One search result: which dictionary it came from, the matched headword, and
-/// the relevance score (higher is better).
+/// One search result: which dictionary it came from, the matched headword, the
+/// relevance score (higher is better), and a short raw definition preview (so
+/// front-ends can show a snippet without a second lookup).
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     pub dictionary: String,
     pub headword: String,
     pub score: f32,
+    pub snippet: String,
 }
+
+/// Leading slice of a stored definition, for result-list previews.
+const SNIPPET_LEN: usize = 300;
 
 /// Tantivy schema field handles for the dictionary index.
 #[derive(Clone, Copy)]
@@ -194,10 +199,12 @@ impl SearchEngine {
             let doc: tantivy::TantivyDocument = searcher.doc(addr).map_err(map_err)?;
             let dictionary = stored_text(&doc, self.fields.dictionary);
             let headword = stored_text(&doc, self.fields.headword);
+            let snippet = snippet_text(&doc, self.fields.definition);
             hits.push(SearchHit {
                 dictionary,
                 headword,
                 score,
+                snippet,
             });
         }
         Ok(hits)
@@ -213,8 +220,9 @@ impl SearchEngine {
     ///    queries don't match a large fraction of the dictionary (length guard);
     /// 2. stack an exact + distance-1 + distance-2 query with widely separated
     ///    boosts, so closer matches both *retrieve* first and rank first;
-    /// 3. over-fetch and re-rank in Rust by true Levenshtein distance, with a
-    ///    first-character anchor as a prefix guard and stable tie-breaks.
+    /// 3. over-fetch and re-rank in Rust by true edit distance (transposition-
+    ///    aware), with a first-character anchor as a prefix guard and stable
+    ///    tie-breaks.
     fn fuzzy_search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, Error> {
         let lower = query.to_lowercase();
         let len = lower.chars().count();
@@ -270,9 +278,10 @@ impl SearchEngine {
             if hw_lower.chars().next() != first {
                 continue;
             }
-            let distance = levenshtein(&lower, &hw_lower);
+            let distance = edit_distance(&lower, &hw_lower);
             let hit = SearchHit {
                 dictionary: stored_text(&doc, self.fields.dictionary),
+                snippet: snippet_text(&doc, self.fields.definition),
                 headword,
                 // A distance-based score so closer matches read as more relevant.
                 score: 1.0 / (1.0 + distance as f32),
@@ -291,6 +300,15 @@ impl SearchEngine {
     }
 }
 
+/// Leading slice of a stored field, on a char boundary, for snippet previews.
+fn snippet_text(doc: &tantivy::TantivyDocument, field: Field) -> String {
+    let full = doc.get_first(field).and_then(|v| v.as_str()).unwrap_or("");
+    match full.char_indices().nth(SNIPPET_LEN) {
+        Some((idx, _)) => full[..idx].to_string(),
+        None => full.to_string(),
+    }
+}
+
 fn stored_text(doc: &tantivy::TantivyDocument, field: Field) -> String {
     doc.get_first(field)
         .and_then(|v| v.as_str())
@@ -298,25 +316,40 @@ fn stored_text(doc: &tantivy::TantivyDocument, field: Field) -> String {
         .to_string()
 }
 
-/// Levenshtein edit distance between two strings (insert/delete/substitute, no
-/// transposition discount). Operates on `char`s so it is Unicode-correct.
-fn levenshtein(a: &str, b: &str) -> usize {
+/// Optimal string alignment distance (restricted Damerau–Levenshtein): like
+/// Levenshtein (insert/delete/substitute) but a swap of two *adjacent*
+/// characters counts as a single edit. That keeps common typos close — e.g.
+/// "recieve" → "receive" is distance 1, not 2. Operates on `char`s, so it is
+/// Unicode-correct.
+fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
-    if a.is_empty() {
-        return b.len();
+    let (n, m) = (a.len(), b.len());
+    if n == 0 {
+        return m;
     }
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut curr = vec![0usize; b.len() + 1];
-    for (i, &ca) in a.iter().enumerate() {
-        curr[0] = i + 1;
-        for (j, &cb) in b.iter().enumerate() {
-            let cost = usize::from(ca != cb);
-            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+    if m == 0 {
+        return n;
+    }
+    // Three rolling rows: row i-2 (`two`), row i-1 (`one`), row i (`cur`).
+    let mut two = vec![0usize; m + 1];
+    let mut one: Vec<usize> = (0..=m).collect();
+    let mut cur = vec![0usize; m + 1];
+    for i in 1..=n {
+        cur[0] = i;
+        for j in 1..=m {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut v = (one[j] + 1).min(cur[j - 1] + 1).min(one[j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                v = v.min(two[j - 2] + 1); // adjacent transposition
+            }
+            cur[j] = v;
         }
-        std::mem::swap(&mut prev, &mut curr);
+        // Rotate rows: two <- one, one <- cur, cur <- (scratch).
+        std::mem::swap(&mut one, &mut two);
+        std::mem::swap(&mut one, &mut cur);
     }
-    prev[b.len()]
+    one[m]
 }
 
 /// Escape regex metacharacters so a literal prefix can be used in a
@@ -337,22 +370,29 @@ fn regex_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::levenshtein;
+    use super::edit_distance;
 
     #[test]
-    fn levenshtein_basics() {
-        assert_eq!(levenshtein("hello", "hello"), 0);
-        assert_eq!(levenshtein("helo", "hello"), 1); // insertion
-        assert_eq!(levenshtein("hallo", "hello"), 1); // substitution
-        assert_eq!(levenshtein("hell", "hello"), 1); // deletion
-        assert_eq!(levenshtein("ba", "baba"), 2);
-        assert_eq!(levenshtein("", "abc"), 3);
-        assert_eq!(levenshtein("abc", ""), 3);
+    fn edit_distance_basics() {
+        assert_eq!(edit_distance("hello", "hello"), 0);
+        assert_eq!(edit_distance("helo", "hello"), 1); // insertion
+        assert_eq!(edit_distance("hallo", "hello"), 1); // substitution
+        assert_eq!(edit_distance("hell", "hello"), 1); // deletion
+        assert_eq!(edit_distance("ba", "baba"), 2);
+        assert_eq!(edit_distance("", "abc"), 3);
+        assert_eq!(edit_distance("abc", ""), 3);
     }
 
     #[test]
-    fn levenshtein_is_unicode_aware() {
+    fn edit_distance_counts_adjacent_transposition_as_one() {
+        assert_eq!(edit_distance("ba", "ab"), 1);
+        // The classic "i before e" typo is a single transposition, not two subs.
+        assert_eq!(edit_distance("recieve", "receive"), 1);
+    }
+
+    #[test]
+    fn edit_distance_is_unicode_aware() {
         // Counts characters, not bytes: "é" is multi-byte but one char.
-        assert_eq!(levenshtein("café", "cafe"), 1);
+        assert_eq!(edit_distance("café", "cafe"), 1);
     }
 }

@@ -144,7 +144,9 @@ so both share the same backend).
     `ba`→`baba` is allowed — just ranked below closer matches); (2) a boosted
     `BooleanQuery` of exact + dist-1 + dist-2
     clauses so closer matches retrieve and rank first; (3) over-fetch + Rust re-rank
-    by true Levenshtein distance (`levenshtein`, char-wise/Unicode-aware) with a
+    by true edit distance (`edit_distance` — optimal string alignment /
+    restricted Damerau–Levenshtein, so an adjacent transposition like
+    `recieve`→`receive` costs 1, not 2; char-wise/Unicode-aware) with a
     first-character prefix guard and stable tie-breaks. `score` is `1/(1+distance)`.
   - **Entry iteration:** `Dictionary::for_each_entry` walks `idx.items` and pulls each
     definition (disjoint field borrows of the `stardict` inner); `DictionaryManager::
