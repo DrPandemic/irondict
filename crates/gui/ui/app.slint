@@ -1,0 +1,277 @@
+import { ListView, ScrollView } from "std-widgets.slint";
+
+// Bundled IBM Plex Sans (SIL OFL). A bare file import registers the font at
+// compile time so "IBM Plex Sans" is available as a font-family.
+import "../assets/fonts/IBMPlexSans-400.ttf";
+import "../assets/fonts/IBMPlexSans-500.ttf";
+import "../assets/fonts/IBMPlexSans-600.ttf";
+import "../assets/fonts/IBMPlexSans-700.ttf";
+
+// One row in the results column: a headword plus a one-line preview.
+struct ResultItem {
+    headword: string,
+    snippet: string,
+    source: string,
+}
+
+export component AppWindow inherits Window {
+    title: "irondict";
+    preferred-width: 920px;
+    preferred-height: 560px;
+    min-width: 640px;
+    min-height: 420px;
+    default-font-family: "IBM Plex Sans";
+    default-font-size: 14px;
+    background: #ffffff;
+
+    // ---- theming (accent comes from Rust; defaults to indigo) ----
+    in property <color> accent: #4f46e5;
+    in property <color> accent-tint: #eef0fd;
+    property <color> text-primary: #1c1c1e;
+    property <color> text-secondary: #8a8a8e;
+    property <color> divider: #ececec;
+    property <color> toolbar-bg: #fafafa;
+
+    // ---- state (driven by Rust) ----
+    in-out property <string> query;
+    in property <[ResultItem]> results;
+    in-out property <int> selected-index: 0;
+    in property <bool> searching: false;
+    in property <int> scope: 0;            // 0 = All, 1 = GCIDE
+
+    in property <string> section-label;    // e.g. "WORD OF THE MOMENT"
+    in property <string> def-headword;
+    in property <string> def-pos;
+    in property <string> def-body;
+    in property <string> def-source;
+
+    callback query-changed(string);
+    callback select(int);
+    callback scope-changed(int);
+
+    // Focus the search field on launch; global shortcuts still bubble up to the
+    // FocusScope below.
+    forward-focus: search-input;
+    init => {
+        search-input.focus();
+    }
+
+    FocusScope {
+        // Ctrl+1 / Ctrl+2 pick a dictionary scope; Ctrl+Tab cycles.
+        key-pressed(event) => {
+            if (event.modifiers.control && event.text == "1") {
+                root.scope-changed(0);
+                return EventResult.accept;
+            }
+            if (event.modifiers.control && event.text == "2") {
+                root.scope-changed(1);
+                return EventResult.accept;
+            }
+            if (event.modifiers.control && event.text == Key.Tab) {
+                root.scope-changed(root.scope == 0 ? 1 : 0);
+                return EventResult.accept;
+            }
+            return EventResult.reject;
+        }
+
+        VerticalLayout {
+        // ===================== toolbar =====================
+        Rectangle {
+            height: 52px;
+            background: toolbar-bg;
+
+            // scope segmented control (left)
+            Rectangle {
+                x: 16px;
+                y: (parent.height - self.height) / 2;
+                height: 30px;
+                width: 168px;
+                border-radius: 8px;
+                background: #ffffff;
+                border-width: 1px;
+                border-color: divider;
+                HorizontalLayout {
+                    padding: 3px;
+                    spacing: 2px;
+                    for seg[idx] in ["All", "GCIDE"]: Rectangle {
+                        border-radius: 6px;
+                        background: scope == idx ? accent : transparent;
+                        TouchArea {
+                            clicked => { root.scope-changed(idx); }
+                        }
+                        Text {
+                            text: seg;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            font-size: 13px;
+                            font-weight: scope == idx ? 600 : 400;
+                            color: scope == idx ? #ffffff : text-secondary;
+                        }
+                    }
+                }
+            }
+
+            // search field (right)
+            Rectangle {
+                x: parent.width - self.width - 16px;
+                y: (parent.height - self.height) / 2;
+                height: 32px;
+                width: 280px;
+                border-radius: 8px;
+                background: #ffffff;
+                border-width: 1px;
+                border-color: search-input.has-focus ? accent : divider;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 6px;
+                    Text {
+                        text: "⌕";
+                        vertical-alignment: center;
+                        font-size: 17px;
+                        color: text-secondary;
+                    }
+                    Rectangle {
+                        search-input := TextInput {
+                            vertical-alignment: center;
+                            font-size: 14px;
+                            color: text-primary;
+                            single-line: true;
+                            text <=> root.query;
+                            edited => { root.query-changed(self.text); }
+                        }
+                        Text {
+                            visible: root.query == "";
+                            text: "Search…";
+                            vertical-alignment: center;
+                            font-size: 14px;
+                            color: text-secondary;
+                        }
+                    }
+                }
+            }
+
+            // bottom hairline
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: divider;
+            }
+        }
+
+        // ===================== body =====================
+        HorizontalLayout {
+            // results column (always visible)
+            Rectangle {
+                width: 244px;
+                background: #ffffff;
+                ListView {
+                    for item[i] in results: Rectangle {
+                        height: 60px;
+                        background: i == root.selected-index ? accent-tint : transparent;
+
+                        // accent left bar on the selected row
+                        Rectangle {
+                            x: 0;
+                            width: 3px;
+                            background: i == root.selected-index ? accent : transparent;
+                        }
+                        TouchArea {
+                            clicked => { root.select(i); }
+                        }
+                        VerticalLayout {
+                            padding-left: 17px;
+                            padding-right: 12px;
+                            padding-top: 11px;
+                            padding-bottom: 11px;
+                            spacing: 3px;
+                            Text {
+                                text: item.headword;
+                                font-size: 14px;
+                                font-weight: 500;
+                                color: text-primary;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: item.snippet;
+                                font-size: 12px;
+                                color: text-secondary;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+
+                // divider between list and definition
+                Rectangle {
+                    x: parent.width - 1px;
+                    width: 1px;
+                    background: divider;
+                }
+            }
+
+            // definition pane (the hero)
+            Rectangle {
+                horizontal-stretch: 1;
+                background: #ffffff;
+                ScrollView {
+                    VerticalLayout {
+                        padding: 40px;
+                        spacing: 12px;
+                        alignment: start;
+
+                        Text {
+                            visible: section-label != "";
+                            text: section-label;
+                            color: accent;
+                            font-size: 11px;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: def-headword;
+                            font-size: 30px;
+                            font-weight: 600;
+                            color: text-primary;
+                        }
+                        Text {
+                            visible: def-pos != "";
+                            text: def-pos;
+                            font-size: 13px;
+                            color: text-secondary;
+                        }
+                        Text {
+                            text: def-body;
+                            font-size: 16px;
+                            color: text-primary;
+                            wrap: word-wrap;
+                        }
+
+                        // source pill (hugs its text)
+                        HorizontalLayout {
+                            alignment: start;
+                            Rectangle {
+                                visible: def-source != "";
+                                height: 24px;
+                                horizontal-stretch: 0;
+                                border-radius: 12px;
+                                background: accent-tint;
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    Text {
+                                        text: def-source;
+                                        vertical-alignment: center;
+                                        font-size: 11px;
+                                        font-weight: 500;
+                                        color: accent;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        }
+    }
+}
