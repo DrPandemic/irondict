@@ -321,8 +321,10 @@ export component AppWindow inherits Window {
                     padding-bottom: 28px;
                     spacing: 10px;
 
-                    Text {
-                        visible: section-label != "";
+                    // Hidden header lines use `if` (not `visible`) so they reserve
+                    // no layout space — otherwise the gap below the headword grows
+                    // for entries without a pos/etymology/conjugation.
+                    if section-label != "" : Text {
                         text: section-label;
                         color: accent;
                         font-size: 11px;
@@ -335,27 +337,23 @@ export component AppWindow inherits Window {
                         color: text-primary;
                     }
                     // part of speech + pronunciation on one grey line
-                    HorizontalLayout {
+                    if def-pos != "" || def-pron != "" : HorizontalLayout {
                         spacing: 10px;
                         alignment: start;
-                        visible: def-pos != "" || def-pron != "";
-                        Text {
-                            visible: def-pos != "";
+                        if def-pos != "" : Text {
                             text: def-pos;
                             font-size: 13px;
                             font-italic: true;
                             color: text-secondary;
                         }
-                        Text {
-                            visible: def-pron != "";
-                            text: "· " + def-pron;
+                        if def-pron != "" : Text {
+                            text: def-pos != "" ? "· " + def-pron : def-pron;
                             font-size: 13px;
                             color: text-secondary;
                         }
                     }
                     // etymology (HTML entries) on its own grey line
-                    Text {
-                        visible: def-etym != "";
+                    if def-etym != "" : Text {
                         text: def-etym;
                         font-size: 13px;
                         color: text-secondary;
@@ -364,9 +362,8 @@ export component AppWindow inherits Window {
 
                     // conjugation button (verbs only): opens the full tables in
                     // an overlay so they never crowd out the definition body.
-                    HorizontalLayout {
+                    if conjugation.length > 0 : HorizontalLayout {
                         alignment: start;
-                        visible: conjugation.length > 0;
                         Rectangle {
                             height: 30px;
                             horizontal-stretch: 0;

@@ -1031,8 +1031,7 @@ fn html_to_blocks(html: &str) -> Vec<String> {
                     if tag_name(trimmed) == "font" {
                         symbol_depth += 1;
                     }
-                } else if tag_name(trimmed) == "font" && is_symbol_font(&tag.to_ascii_lowercase())
-                {
+                } else if tag_name(trimmed) == "font" && is_symbol_font(&tag.to_ascii_lowercase()) {
                     symbol_depth += 1;
                 } else if is_block_tag(&tag) {
                     flush_paragraph(&mut cur, &mut paras);
@@ -1122,14 +1121,19 @@ fn is_etym_line(para: &str) -> bool {
     head.starts_with("étym") || head.starts_with("etym")
 }
 
-/// If a paragraph opens with a sense-bullet glyph (e.g. `■ a sense…`), split the
-/// glyph off as the block's hanging marker so it renders in the marker
-/// column (lighter, aligned) instead of inline. Returns `(marker, body)`.
+/// If a paragraph opens with a sense marker — a bullet glyph (`■ a sense…`) or a
+/// leading sense number (`1 a sense…`) — split it off as the block's hanging
+/// marker so it renders in the marker column (accent, aligned) instead of inline,
+/// matching GCIDE's numbered senses. Returns `(marker, body)`.
 fn split_sense_marker(para: &str) -> (String, String) {
-    let first = para.chars().next();
+    let trimmed = para.trim_start();
+    let first = trimmed.chars().next();
     if first.is_some_and(is_sense_bullet) {
-        let body: String = para.chars().skip(1).collect();
-        return (first.unwrap().to_string(), body.trim_start().to_string());
+        let body = trimmed[first.unwrap().len_utf8()..].trim_start();
+        return (first.unwrap().to_string(), body.to_string());
+    }
+    if let Some(split) = split_numeric_marker(trimmed) {
+        return split;
     }
     (String::new(), para.to_string())
 }
@@ -1140,6 +1144,22 @@ fn is_sense_bullet(c: char) -> bool {
         c,
         '■' | '□' | '▪' | '▫' | '●' | '○' | '◆' | '◇' | '◊' | '♦' | '•' | '‣'
     )
+}
+
+/// Split a leading arabic sense number (one or two digits followed by a space,
+/// e.g. `1 (1564) Tuer…`) off as the marker. Returns `None` when the line doesn't
+/// open with such a marker, including the `1 250`-style case where the number is
+/// really part of running text (the body would then start with another digit).
+fn split_numeric_marker(s: &str) -> Option<(String, String)> {
+    let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() || digits.len() > 2 {
+        return None;
+    }
+    let rest = s[digits.len()..].strip_prefix(' ')?.trim_start();
+    if rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((digits, rest.to_string()))
 }
 
 /// Collapse whitespace in `cur`, push it as a paragraph if non-empty, and reset.
@@ -1621,6 +1641,20 @@ mod tests {
         let (marker, body) = split_sense_marker("etym. 1500; from sample");
         assert_eq!(marker, "");
         assert_eq!(body, "etym. 1500; from sample");
+    }
+
+    #[test]
+    fn splits_leading_sense_number() {
+        // Numbered senses get the number lifted into the marker column.
+        let (marker, body) = split_sense_marker("1 (1564) A first sense.");
+        assert_eq!(marker, "1");
+        assert_eq!(body, "(1564) A first sense.");
+        let (marker, _) = split_sense_marker("12 A later sense.");
+        assert_eq!(marker, "12");
+        // A number that's really part of the text (e.g. "1 250 inhabitants") is not
+        // a marker, and neither is a three-digit/standalone year.
+        assert_eq!(split_sense_marker("1 250 units.").0, "");
+        assert_eq!(split_sense_marker("1564 was a year.").0, "");
     }
 
     #[test]

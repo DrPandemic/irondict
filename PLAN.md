@@ -286,11 +286,11 @@ so both share the same backend).
     interactive file-picker dialog itself still wants a hands-on test on the target
     desktop.
 
-- [ ] **Phase 8 — Verb conjugation (English + French).** Given a verb headword,
-  surface its conjugation. Two languages are first-class: **English** (compact
-  principal parts) and **French** (the full person × tense × mood grid). The core
-  API is **language-aware** from the start so a third language is just another
-  backend.
+- [x] **Phase 8 — Verb conjugation (English + French).** Given a verb headword,
+  surface its conjugation. Conjugation is sourced **from the loaded dictionaries**
+  (plus in-code grammar rules) — **no verb dataset is bundled** (no Verbiste, no
+  irregular-verb table). The core API is **language-aware** so a third language is
+  just another backend.
 
   **Core model** (`crates/core/src/conjugation.rs`) — general enough for both a tiny
   English set and a large French grid:
@@ -298,48 +298,53 @@ so both share the same backend).
     `ConjSection { label, forms: Vec<ConjForm { label, text }> }` is one mood/tense
     (e.g. "Indicatif présent") holding its person-tagged forms. English collapses to
     a single section of principal parts; French expands to many.
-  - A `Conjugator` trait (`fn conjugate(&self, headword) -> Option<Conjugation>`,
-    `fn language(&self) -> Lang`) with one implementation per language, plus a
-    registry that routes a lookup to the right backend.
+  - A `Conjugator` trait (`fn conjugate(&self, headword, definition, force) ->
+    Option<Conjugation>`, `fn language(&self) -> Language`) with one implementation
+    per language, plus a `ConjugatorRegistry` that routes a lookup to the right
+    backend.
 
   **Language routing:** prefer the **per-dictionary language** pinned in the Phase 7
-  settings page (default **Auto**); when that is Auto, fall back to the StarDict
-  `.ifo` language if present, then try each registered backend and accept the first
-  that recognizes the headword as a verb. The pinned setting disambiguates
-  homographs that exist in both languages (e.g. *important*) deterministically.
+  settings page (default **Auto**). A pinned language forces a best-effort table
+  (`force = true`); under **Auto** every backend is tried with `force = false` and
+  the first that recognizes the headword as a verb wins — so English's permissive
+  rule generator can't shadow another language. The pinned setting disambiguates
+  homographs deterministically.
 
-  **English backend** — three sources, highest-confidence first:
+  **English backend** (`conjugation/english.rs`) — two sources, highest-confidence
+  first:
   1. **Parse GCIDE's inflection block.** Verb entries encode principal parts right
      after the POS, e.g. `\Go\ …, v. i. [imp. {Went}; p. p. {Gone}; p. pr. & vb. n.
      {Going}.]` — `imp.` = past, `p. p.` = past participle, `p. pr. & vb. n.` =
-     present participle. These authoritative forms win.
+     present participle. These authoritative forms win (balance-matched brackets;
+     `{…}` alternates joined only by `or`/comma so cross-references like `See {Wend}`
+     aren't mistaken for forms).
   2. **Rule-based generator** for regular verbs GCIDE didn't annotate: 3rd-singular
      (`-s` / `-es` after sibilants / `y→ies`), past `-ed`, present participle `-ing`
-     (final-consonant doubling, silent-`e` drop).
-  3. **Irregular-verb table** (small committed data file) for common irregulars
-     (go/went/gone) when GCIDE supplied nothing.
+     (final-consonant doubling, silent-`e` drop). The three suppletive present-tense
+     verbs (be→is, have→has, do→does) are handled as a grammar rule, not a data file.
 
-  **French backend** — data-driven, since French has three groups, ~7000 verbs, and
-  pervasive orthographic stem changes (`-cer→-ç-`, `-ger→-ge-`, `e→è`, `y→i`,
-  `appeler→appelle`) that don't reduce to a few rules:
-  - Use **Verbiste** data (`verbs-fr.xml` = verb→template index, `conjugation-fr.xml`
-    = ending templates per tense/person). It is **GPL**, so it redistributes cleanly
-    inside this GPL-3.0-or-later project. Commit it under `crates/core/assets/` like
-    GCIDE, with provenance + license recorded in `docs/`.
-  - Conjugation = look up the verb's template, then apply each template's
-    radical-change + endings to produce every form across **infinitif, indicatif
-    (présent, imparfait, futur, passé simple), conditionnel présent, subjonctif
-    présent/imparfait, impératif, participes (présent, passé)**, all six persons.
-  - This lexicon is **self-contained** — it conjugates whether or not a French
-    StarDict is loaded; a loaded French dictionary just gives the headword to look up.
+  **French backend** (`conjugation/french.rs`) — **parse from the loaded
+  dictionary**, best-effort and conservative: it reads tense headings + person
+  pronouns out of whatever conjugation content a French StarDict actually provides,
+  and returns nothing for ordinary prose (requires ≥2 sections of ≥3 forms). A
+  dictionary that only references a numbered conjugation model yields nothing —
+  honest rather than fabricated. (A real generator could be added later, but only
+  if it needs no bundled non-OSS data.)
 
   **Front-ends:**
-  - **CLI:** `conjugate [--lang en|fr] <verb>` — prints principal parts (English) or
-    the conjugation table (French); language auto-detected when `--lang` is omitted.
-  - **GUI:** when the displayed entry is a recognized verb, render a **"Conjugation"**
-    block in the definition pane. English shows a compact line of principal parts;
-    French shows a **tense/person grid** (collapsible per section), styled like the
-    senses (accent section labels, selectable forms). Hidden for non-verbs.
+  - **CLI:** `conjugate [--lang en|fr] <verb>` — looks the word up, then routes its
+    definition(s) through the registry; prints the infinitive and each section's
+    person-tagged forms. Language auto-detected when `--lang` is omitted.
+  - **GUI:** when the displayed entry is a recognized verb, the definition pane shows
+    a compact **"Conjugation ▸" button** (not an inline block, so it never crowds the
+    body); clicking it opens a centered overlay (same chrome as Settings) with the
+    full sections/forms. Hidden for non-verbs; closed by default and on navigation.
+
+  **Implemented:** `crates/core/src/conjugation.rs` (model + `Conjugator` trait +
+  `ConjugatorRegistry`), `conjugation/english.rs` (GCIDE block parser + spelling
+  rules + suppletive present), `conjugation/french.rs` (conservative table parser),
+  `conjugation/tests.rs` (9 tests over GCIDE-style fixtures + a French table). CLI
+  `conjugate [--lang en|fr]`; GUI conjugation button + overlay.
 
 - [ ] **Phase 9 — Polish.** Rich definition rendering (HTML/markup data types,
   including GCIDE's markup), search history, packaging of GCIDE.
@@ -348,8 +353,9 @@ so both share the same backend).
 
 - `Cargo.toml` (root) — convert to `[workspace]`.
 - `crates/core/src/{lib.rs, model.rs, stardict.rs, manager.rs, config.rs, search.rs}`
-- `crates/core/src/conjugation.rs` (+ committed data: an English irregular-verb table
-  and the French **Verbiste** XML `verbs-fr.xml` / `conjugation-fr.xml`) — Phase 8.
+- `crates/core/src/conjugation.rs` + `conjugation/{english,french,tests}.rs` — Phase 8.
+  No bundled verb data: English parses GCIDE + spelling rules; French parses the
+  loaded dictionary's own conjugation content.
 - `crates/cli/src/main.rs` — `clap` CLI.
 - `crates/gui/` — `ui/ui.slint` (markup), `src/main.rs` (glue), `build.rs` (slint-build);
   a settings overlay component (Phase 7).
@@ -373,12 +379,13 @@ so both share the same backend).
   both; disable one → excluded; remove → gone; all of it survives a restart. Switch
   the theme between System/Light/Dark and confirm it applies and persists.
 - **Phase 8:** English — `conjugate go` → went / gone / going (from GCIDE's
-  inflection block), `conjugate walk` → walks / walked / walking (rule-based). French
-  — `conjugate parler` → full regular `-er` table, `conjugate aller` → its irregular
-  forms (`je vais`, `nous allons`, futur `j'irai`…), and a stem-change verb like
-  `appeler` → `j'appelle`. Auto-detection picks the right language with `--lang`
-  omitted; the GUI shows a compact block for English verbs and a tense/person grid
-  for French, hidden for non-verbs.
+  inflection block), `conjugate walk` → walks / walked / walking (rule-based),
+  `conjugate be` → is / was / been (suppletive present). A non-verb headword yields
+  no table. French — with a loaded French dictionary that contains a conjugation
+  table, `conjugate <verb> --lang fr` parses out its sections; a dictionary that only
+  references a numbered model yields nothing (by design — no bundled verb data).
+  Auto-detection picks the right language with `--lang` omitted; the GUI shows a
+  "Conjugation" button on verb entries that opens the full tables in an overlay.
 
 ## Open questions (can defer)
 
