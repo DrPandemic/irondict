@@ -14,6 +14,14 @@ struct ResultItem {
     source: string,
 }
 
+// Read-only text that the user can still select and copy (plain Text can't be
+// selected in Slint).
+component SelectableText inherits TextInput {
+    read-only: true;
+    single-line: false;
+    wrap: word-wrap;
+}
+
 export component AppWindow inherits Window {
     title: "irondict";
     preferred-width: 920px;
@@ -42,8 +50,10 @@ export component AppWindow inherits Window {
 
     in property <string> section-label;    // e.g. "WORD OF THE MOMENT"
     in property <string> def-headword;
-    in property <string> def-pos;
-    in property <string> def-body;
+    in property <string> def-pron;         // pronunciation respelling
+    in property <string> def-pos;          // expanded part of speech
+    in property <[string]> senses;         // numbered definition senses
+    in property <string> def-body;         // free text (messages / fallback)
     in property <string> def-source;
 
     callback query-changed(string);
@@ -228,23 +238,56 @@ export component AppWindow inherits Window {
                             font-size: 11px;
                             font-weight: 600;
                         }
-                        Text {
+                        SelectableText {
                             text: def-headword;
                             font-size: 30px;
                             font-weight: 600;
                             color: text-primary;
                         }
-                        Text {
-                            visible: def-pos != "";
-                            text: def-pos;
-                            font-size: 13px;
-                            color: text-secondary;
+                        // part of speech + pronunciation on one grey line
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: start;
+                            visible: def-pos != "" || def-pron != "";
+                            Text {
+                                visible: def-pos != "";
+                                text: def-pos;
+                                font-size: 13px;
+                                font-italic: true;
+                                color: text-secondary;
+                            }
+                            Text {
+                                visible: def-pron != "";
+                                text: "· " + def-pron;
+                                font-size: 13px;
+                                color: text-secondary;
+                            }
                         }
-                        Text {
+                        // free-text body (used for messages / no-results)
+                        SelectableText {
+                            visible: def-body != "";
                             text: def-body;
                             font-size: 16px;
                             color: text-primary;
-                            wrap: word-wrap;
+                        }
+                        // numbered senses
+                        for sense[i] in senses: HorizontalLayout {
+                            spacing: 10px;
+                            alignment: start;
+                            padding-top: 2px;
+                            Text {
+                                text: (i + 1) + ".";
+                                font-size: 16px;
+                                font-weight: 600;
+                                color: accent;
+                                width: 22px;
+                            }
+                            SelectableText {
+                                text: sense;
+                                font-size: 16px;
+                                color: text-primary;
+                                horizontal-stretch: 1;
+                            }
                         }
 
                         // source pill (hugs its text)

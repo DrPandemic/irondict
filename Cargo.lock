@@ -2687,8 +2687,10 @@ name = "irondict-gui"
 version = "0.1.0"
 dependencies = [
  "irondict-core",
+ "regex",
  "slint",
  "slint-build",
+ "zbus",
 ]
 
 [[package]]
