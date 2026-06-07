@@ -410,7 +410,7 @@ fn parse_entry(raw: &str) -> Parsed {
     static PRON: OnceLock<Regex> = OnceLock::new();
     let phonetic = re(&PHON, r"\\[^\\]+\\\s*\(([^()]+)\)")
         .captures(&text)
-        .map(|c| c[1].to_string())
+        .map(|c| first_variant(&c[1]).to_string())
         .or_else(|| {
             re(&PRON, r"\\([^\\]+)\\")
                 .captures(&text)
@@ -451,6 +451,22 @@ fn drop_markers(text: &str) -> String {
 
 fn strip_braces(s: &str) -> String {
     s.chars().filter(|&c| c != '{' && c != '}').collect()
+}
+
+/// Keep only the first pronunciation variant, dropping alternates (`… or …`),
+/// language tags (`Sp.`, `F.`, …), and reference numbers (`; 277`).
+fn first_variant(phon: &str) -> &str {
+    let mut end = phon.len();
+    let cuts = [
+        " or ", ";", ",", " Sp.", " F.", " L.", " G.", " Gr.", " It.", " NL.", " D.", " AS.",
+        " OF.", " Pg.",
+    ];
+    for c in cuts {
+        if let Some(i) = phon.find(c) {
+            end = end.min(i);
+        }
+    }
+    phon[..end].trim()
 }
 
 /// Turn GCIDE's respelling (`Dic"tion*a*ry`) into syllables (`Dic·tion·a·ry`).
@@ -646,6 +662,50 @@ fn decode_code(code: &str) -> Option<&'static str> {
         // dot above
         ".a" => "ȧ",
         ".e" => "ė",
+        // digraphs / consonants
+        "th" => "th",
+        "dh" => "ð",
+        "ng" => "ŋ",
+        "sh" => "sh",
+        "zh" => "zh",
+        "ch" => "ch",
+        "hw" => "hw",
+        "oo" => "oo",
+        "OO" => "OO",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_phonetic_diacritics() {
+        assert_eq!(decode_gcide("[=a]"), "ā");
+        assert_eq!(decode_gcide("[a^]"), "ă");
+        assert_eq!(decode_gcide("[\"o]"), "ö");
+        assert_eq!(decode_gcide("[ae]sthetic"), "æsthetic");
+        // unknown codes are left untouched
+        assert_eq!(decode_gcide("[Obs.]"), "[Obs.]");
+    }
+
+    #[test]
+    fn parses_archaeology_phonetic() {
+        let raw = "Archaeology \\Ar`ch[ae]*ol\"o*gy\\ ([aum]r`k[-e]*[o^]l\"[-o]*j[y^]), n.\n   \
+                   1. The science of antiquities.\n";
+        let parsed = parse_entry(raw);
+        assert_eq!(parsed.pronunciation, "är·kē·ŏl·ō·jy̆");
+        assert_eq!(parsed.pos, "noun");
+        assert_eq!(parsed.senses, vec!["The science of antiquities."]);
+    }
+
+    #[test]
+    fn keeps_only_first_phonetic_variant() {
+        // "either": two variants plus a reference number.
+        let raw = "Either \\Ei\"ther\\ ([=e]\"[th][~e]r or [imac]\"[th][~e]r; 277), a.\n   \
+                   1. One of two.\n";
+        let parsed = parse_entry(raw);
+        assert_eq!(parsed.pronunciation, "ē·thẽr");
+    }
 }
