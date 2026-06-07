@@ -185,14 +185,14 @@ fn main() -> Result<(), slint::PlatformError> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos() as usize)
         .unwrap_or(0);
-    let wotm = word_of_the_moment(&manager, ui.get_scope(), seed);
+    let (wotm, wotm_src) = word_of_the_moment(&manager, ui.get_scope(), seed);
     show_word(
         &ui,
         &manager,
         &blocks_model,
         &wotm,
         "WORD OF THE MOMENT",
-        None,
+        wotm_src.as_deref(),
     );
 
     // Build/open the index off the UI thread; deliver it via a channel. The
@@ -266,14 +266,14 @@ fn main() -> Result<(), slint::PlatformError> {
                 results_model.set_vec(Vec::new());
                 rows.borrow_mut().clear();
                 ui.set_selected_index(-1);
-                let wotm = word_of_the_moment(&manager, ui.get_scope(), seed);
+                let (wotm, wotm_src) = word_of_the_moment(&manager, ui.get_scope(), seed);
                 show_word(
                     &ui,
                     &manager,
                     &blocks_model,
                     &wotm,
                     "WORD OF THE MOMENT",
-                    None,
+                    wotm_src.as_deref(),
                 );
                 return;
             }
@@ -352,14 +352,14 @@ fn main() -> Result<(), slint::PlatformError> {
             let q = ui.get_query();
             if q.trim().is_empty() {
                 // The word of the moment follows the newly-selected dictionary.
-                let wotm = word_of_the_moment(&manager, idx, seed);
+                let (wotm, wotm_src) = word_of_the_moment(&manager, idx, seed);
                 show_word(
                     &ui,
                     &manager,
                     &blocks_model,
                     &wotm,
                     "WORD OF THE MOMENT",
-                    None,
+                    wotm_src.as_deref(),
                 );
             } else {
                 run_search(
@@ -669,13 +669,14 @@ fn group_thousands(n: usize) -> String {
 }
 
 /// Pick the "word of the moment" for the active `scope`: a stable-per-launch
-/// (`seed`-chosen) headword drawn from the dictionary that scope selects. Index 0
-/// ("All") and any out-of-range index fall back to the first enabled dictionary.
+/// (`seed`-chosen) headword drawn from the dictionary that scope selects, together
+/// with that dictionary's name so the lookup can be scoped to it. Index 0 ("All")
+/// and any out-of-range index fall back to the first enabled dictionary.
 fn word_of_the_moment(
     manager: &Rc<RefCell<DictionaryManager>>,
     scope: i32,
     seed: usize,
-) -> String {
+) -> (String, Option<String>) {
     let m = manager.borrow();
     let mut enabled = m.dictionaries().iter().filter(|d| d.enabled);
     let dict = if scope <= 0 {
@@ -683,8 +684,12 @@ fn word_of_the_moment(
     } else {
         enabled.nth(scope as usize - 1)
     };
-    dict.and_then(|d| d.dictionary.nth_headword(seed))
-        .unwrap_or_else(|| "irondict".to_string())
+    dict.and_then(|d| {
+        d.dictionary
+            .nth_headword(seed)
+            .map(|w| (w, Some(d.name().to_string())))
+    })
+    .unwrap_or_else(|| ("irondict".to_string(), None))
 }
 
 /// Map a scope index to the dictionary it restricts results to: index 0 ("All")
@@ -735,8 +740,9 @@ fn show_message(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, title: &s
     ui.set_def_headword(title.into());
     ui.set_def_pron("".into());
     ui.set_def_pos("".into());
+    ui.set_def_etym("".into());
     blocks_model.set_vec(vec![DefBlock {
-        number: 0,
+        marker: "".into(),
         text: body.into(),
     }]);
     ui.set_def_source("".into());
@@ -846,25 +852,34 @@ fn show_word(
     ui.set_def_source(source.clone().into());
 
     let blocks: Vec<DefBlock> = if html {
-        // HTML entry (e.g. Petit Robert): no GCIDE pos/pron. Convert to plain-text
-        // paragraphs so tags don't show, and so the body can be virtualized.
-        ui.set_def_pron("".into());
-        ui.set_def_pos("".into());
-        html_to_blocks(&raw)
+        // HTML entry: the first paragraph repeats the headword with its phonetic
+        // and part of speech. Lift those onto the grey pron/pos line (as GCIDE
+        // does) and drop the duplicate, then convert the rest to plain-text
+        // paragraphs so tags don't show and the body can be virtualized.
+        let mut paras = html_to_blocks(&raw);
+        let (pron, pos, etym) = extract_html_header(&mut paras, headword);
+        ui.set_def_pron(pron.into());
+        ui.set_def_pos(pos.into());
+        ui.set_def_etym(etym.into());
+        paras
             .into_iter()
-            .map(|t| DefBlock {
-                number: 0,
-                text: t.into(),
+            .map(|t| {
+                let (marker, text) = split_sense_marker(&t);
+                DefBlock {
+                    marker: marker.into(),
+                    text: text.into(),
+                }
             })
             .collect()
     } else {
         let parsed = parse_entry(&raw);
         ui.set_def_pron(parsed.pronunciation.into());
         ui.set_def_pos(parsed.pos.into());
+        ui.set_def_etym("".into());
         if parsed.senses.is_empty() {
             // Fall back to lightly-cleaned text when we couldn't split senses.
             vec![DefBlock {
-                number: 0,
+                marker: "".into(),
                 text: cleaned_plain(&raw).into(),
             }]
         } else {
@@ -873,7 +888,7 @@ fn show_word(
                 .into_iter()
                 .enumerate()
                 .map(|(i, s)| DefBlock {
-                    number: i as i32 + 1,
+                    marker: format!("{}.", i + 1).into(),
                     text: s.into(),
                 })
                 .collect()
@@ -958,7 +973,10 @@ fn lookup_raw(
                 return (String::new(), String::new(), false);
             };
             let source = first.dictionary.clone();
-            // StarDict type 'h' = HTML (`sametypesequence=h`, e.g. Petit Robert).
+            // StarDict type 'h' = HTML (`sametypesequence=h`). Only show the source
+            // dictionary's own entries: mixing a plain-text and an HTML dictionary
+            // (the same headword in both) would leak one's markup into the other's
+            // renderer, and the source pill names a single dictionary anyway.
             let html = first
                 .entries
                 .first()
@@ -966,7 +984,7 @@ fn lookup_raw(
                 .map(|s| s.type_.contains('h'))
                 .unwrap_or(false);
             let mut parts = Vec::new();
-            for r in &results {
+            for r in results.iter().filter(|r| r.dictionary == source) {
                 for e in &r.entries {
                     parts.push(
                         e.segments
@@ -992,6 +1010,10 @@ fn html_to_blocks(html: &str) -> Vec<String> {
     let mut paras: Vec<String> = Vec::new();
     let mut cur = String::new();
     let mut i = 0;
+    // Depth of nested `<font>` elements whose face is a symbol/dingbat: their
+    // letters are decorative glyphs, not text (some HTML dictionaries use a
+    // Wingdings "v" as a section divider), so we suppress all output inside them.
+    let mut symbol_depth = 0usize;
     while i < chars.len() {
         match chars[i] {
             '<' => {
@@ -1001,7 +1023,18 @@ fn html_to_blocks(html: &str) -> Vec<String> {
                     j += 1;
                 }
                 let tag: String = chars[start..j].iter().collect();
-                if is_block_tag(&tag) {
+                let trimmed = tag.trim();
+                if trimmed.eq_ignore_ascii_case("/font") {
+                    symbol_depth = symbol_depth.saturating_sub(1);
+                } else if symbol_depth > 0 {
+                    // Inside a dingbat run: keep `<font>` nesting balanced; drop all else.
+                    if tag_name(trimmed) == "font" {
+                        symbol_depth += 1;
+                    }
+                } else if tag_name(trimmed) == "font" && is_symbol_font(&tag.to_ascii_lowercase())
+                {
+                    symbol_depth += 1;
+                } else if is_block_tag(&tag) {
                     flush_paragraph(&mut cur, &mut paras);
                 }
                 i = if j < chars.len() { j + 1 } else { j };
@@ -1015,16 +1048,22 @@ fn html_to_blocks(html: &str) -> Vec<String> {
                 if j < limit && chars[j] == ';' {
                     let ent: String = chars[i + 1..j].iter().collect();
                     if let Some(s) = decode_entity(&ent) {
-                        cur.push_str(&s);
+                        if symbol_depth == 0 {
+                            cur.push_str(&s);
+                        }
                     }
                     i = j + 1;
                 } else {
-                    cur.push('&');
+                    if symbol_depth == 0 {
+                        cur.push('&');
+                    }
                     i += 1;
                 }
             }
             c => {
-                cur.push(c);
+                if symbol_depth == 0 {
+                    cur.push(c);
+                }
                 i += 1;
             }
         }
@@ -1042,6 +1081,67 @@ fn html_to_blocks(html: &str) -> Vec<String> {
     out
 }
 
+/// Lift the header lines out of an HTML entry's leading paragraphs and drop them
+/// from the body. The first paragraph is the repeated headword line, e.g.
+/// `headword [prɒn] adjective`: its first `[…]` is the phonetic and whatever
+/// trails it is the part of speech. A following etymology line (opening with the
+/// "étym." label) is lifted too. Returns `(pron, pos, etym)`; leaves a paragraph
+/// in place when it doesn't look like a header line.
+fn extract_html_header(paras: &mut Vec<String>, headword: &str) -> (String, String, String) {
+    let (mut pron, mut pos) = (String::new(), String::new());
+    if let Some(first) = paras.first() {
+        match (first.find('['), first.find(']')) {
+            (Some(open), Some(close)) if open < close => {
+                pron = first[open + 1..close].trim().to_string();
+                pos = first[close + 1..].trim().to_string();
+                paras.remove(0);
+            }
+            // No bracketed phonetic: only drop the line if it's a bare repeat of
+            // the headword, otherwise leave the body as-is.
+            _ => {
+                if first.trim().eq_ignore_ascii_case(headword.trim()) {
+                    paras.remove(0);
+                }
+            }
+        }
+    }
+
+    // The etymology line, when present, follows the header; lift it as well.
+    let etym = if paras.first().is_some_and(|p| is_etym_line(p)) {
+        paras.remove(0)
+    } else {
+        String::new()
+    };
+
+    (pron, pos, etym)
+}
+
+/// Whether a paragraph is an etymology line (opens with the "étym." label).
+fn is_etym_line(para: &str) -> bool {
+    let head = para.trim_start().to_lowercase();
+    head.starts_with("étym") || head.starts_with("etym")
+}
+
+/// If a paragraph opens with a sense-bullet glyph (e.g. `■ a sense…`), split the
+/// glyph off as the block's hanging marker so it renders in the marker
+/// column (lighter, aligned) instead of inline. Returns `(marker, body)`.
+fn split_sense_marker(para: &str) -> (String, String) {
+    let first = para.chars().next();
+    if first.is_some_and(is_sense_bullet) {
+        let body: String = para.chars().skip(1).collect();
+        return (first.unwrap().to_string(), body.trim_start().to_string());
+    }
+    (String::new(), para.to_string())
+}
+
+/// Whether `c` is a bullet glyph used to mark a sense (not part of running text).
+fn is_sense_bullet(c: char) -> bool {
+    matches!(
+        c,
+        '■' | '□' | '▪' | '▫' | '●' | '○' | '◆' | '◇' | '◊' | '♦' | '•' | '‣'
+    )
+}
+
 /// Collapse whitespace in `cur`, push it as a paragraph if non-empty, and reset.
 fn flush_paragraph(cur: &mut String, paras: &mut Vec<String>) {
     let p = collapse_ws(cur);
@@ -1051,15 +1151,29 @@ fn flush_paragraph(cur: &mut String, paras: &mut Vec<String>) {
     cur.clear();
 }
 
-/// Whether an HTML tag is block-level (so it ends the current paragraph).
-fn is_block_tag(tag: &str) -> bool {
-    let name: String = tag
-        .trim()
+/// The lowercased element name of an HTML tag body (without `<`/`>`), e.g.
+/// `/DIV style="…"` → `div`.
+fn tag_name(tag: &str) -> String {
+    tag.trim()
         .trim_start_matches('/')
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric())
         .collect::<String>()
-        .to_ascii_lowercase();
+        .to_ascii_lowercase()
+}
+
+/// Whether a (lowercased) `<font>` tag selects a symbol/dingbat face whose
+/// letters are decorative glyphs rather than readable text (e.g. a Wingdings "v"
+/// used as a section divider).
+fn is_symbol_font(tag_lower: &str) -> bool {
+    tag_lower.contains("wingdings")
+        || tag_lower.contains("webdings")
+        || tag_lower.contains("dingbat")
+}
+
+/// Whether an HTML tag is block-level (so it ends the current paragraph).
+fn is_block_tag(tag: &str) -> bool {
+    let name = tag_name(tag);
     matches!(
         name.as_str(),
         "div"
@@ -1462,15 +1576,51 @@ mod tests {
 
     #[test]
     fn html_entry_becomes_clean_paragraphs() {
-        let html = "<DIV style=\"font-weight:bold\">manger</DIV> \
-                    <DIV>Ce verbe vient du <SPAN style=\"color: maroon\">latin</span> \
-                    <SPAN style=\"font-style:italic\">manducare</span> &laquo; m&acirc;cher &raquo;.</DIV>";
+        let html = "<DIV style=\"font-weight:bold\">headword</DIV> \
+                    <DIV>A sample with <SPAN style=\"color: maroon\">colored</span> \
+                    <SPAN style=\"font-style:italic\">italic</span> &laquo; m&acirc;cher &raquo;.</DIV>";
         let blocks = html_to_blocks(html);
         assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0], "manger");
-        assert_eq!(blocks[1], "Ce verbe vient du latin manducare « mâcher ».");
+        assert_eq!(blocks[0], "headword");
+        assert_eq!(blocks[1], "A sample with colored italic « mâcher ».");
         // no raw tags leak through
         assert!(blocks.iter().all(|b| !b.contains('<') && !b.contains('>')));
+    }
+
+    #[test]
+    fn drops_wingdings_divider() {
+        // Some HTML entries separate the header from the senses with a Wingdings
+        // "v" glyph; stripped to text it must not leak as a literal "v" paragraph.
+        let html = "<DIV>word</DIV> \
+                    <P style=\"text-align: center\"><FONT FACE=\"Wingdings\">v</FONT></P> \
+                    <DIV>The definition.</DIV>";
+        let blocks = html_to_blocks(html);
+        assert_eq!(blocks, vec!["word", "The definition."]);
+        assert!(!blocks.iter().any(|b| b == "v"));
+    }
+
+    #[test]
+    fn html_header_becomes_pron_pos_line() {
+        let html = "<DIV>headword, fem [hɛdwɜːd] adjective and noun</DIV> \
+                    <DIV>etym. 1500; from sample</DIV>";
+        let mut paras = html_to_blocks(html);
+        let (pron, pos, etym) = extract_html_header(&mut paras, "headword, fem");
+        assert_eq!(pron, "hɛdwɜːd");
+        assert_eq!(pos, "adjective and noun");
+        // the headword and etymology lines are lifted into the header
+        assert_eq!(etym, "etym. 1500; from sample");
+        assert!(paras.is_empty());
+    }
+
+    #[test]
+    fn splits_leading_sense_bullet() {
+        let (marker, body) = split_sense_marker("■ A first sense.");
+        assert_eq!(marker, "■");
+        assert_eq!(body, "A first sense.");
+        // Plain paragraphs keep no marker.
+        let (marker, body) = split_sense_marker("etym. 1500; from sample");
+        assert_eq!(marker, "");
+        assert_eq!(body, "etym. 1500; from sample");
     }
 
     #[test]

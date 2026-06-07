@@ -22,10 +22,11 @@ struct DictRow {
     language: int,  // 0 = Auto, 1 = English, 2 = French
 }
 
-// One block of a definition body: a paragraph (number == 0) or a numbered sense.
-// The body is a list of these so it can be rendered in a virtualized ListView.
+// One block of a definition body. `marker` is the hanging sense marker shown in
+// the left column (a number like "1." or a bullet like "■"); empty for plain
+// paragraphs. The body is a list of these so it renders in a virtualized ListView.
 struct DefBlock {
-    number: int,
+    marker: string,
     text: string,
 }
 
@@ -93,6 +94,7 @@ export component AppWindow inherits Window {
     in property <string> def-headword;
     in property <string> def-pron;         // pronunciation respelling
     in property <string> def-pos;          // expanded part of speech
+    in property <string> def-etym;         // etymology line (HTML entries)
     in property <[DefBlock]> def-blocks;   // definition body (paragraphs / senses)
     in property <string> def-source;
 
@@ -351,6 +353,14 @@ export component AppWindow inherits Window {
                             color: text-secondary;
                         }
                     }
+                    // etymology (HTML entries) on its own grey line
+                    Text {
+                        visible: def-etym != "";
+                        text: def-etym;
+                        font-size: 13px;
+                        color: text-secondary;
+                        wrap: word-wrap;
+                    }
 
                     // conjugation button (verbs only): opens the full tables in
                     // an overlay so they never crowd out the definition body.
@@ -397,12 +407,12 @@ export component AppWindow inherits Window {
                             padding-top: 4px;
                             padding-bottom: 4px;
                             Text {
-                                visible: b.number > 0;
-                                text: b.number + ".";
+                                visible: b.marker != "";
+                                text: b.marker;
                                 font-size: 16px;
                                 font-weight: 600;
                                 color: accent;
-                                width: b.number > 0 ? 24px : 0px;
+                                width: b.marker != "" ? 24px : 0px;
                             }
                             SelectableText {
                                 text: b.text;
