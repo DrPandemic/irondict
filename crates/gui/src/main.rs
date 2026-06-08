@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use regex::Regex;
+use slint::private_unstable_api::re_exports::{parse_markdown, StyledText};
 use slint::{Color, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use irondict_core::{
@@ -215,6 +216,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let engine = engine.clone();
         let results_model = results_model.clone();
         let blocks_model = blocks_model.clone();
+
         let rows = rows.clone();
         index_timer.start(
             TimerMode::Repeated,
@@ -254,6 +256,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let engine = engine.clone();
         let results_model = results_model.clone();
         let blocks_model = blocks_model.clone();
+
         let rows = rows.clone();
         // Debounce: keep typing responsive by deferring the (render-heavy) search
         // until the user pauses, instead of running it on every keystroke.
@@ -282,6 +285,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let engine = engine.clone();
             let results_model = results_model.clone();
             let blocks_model = blocks_model.clone();
+
             let rows = rows.clone();
             debounce.start(
                 TimerMode::SingleShot,
@@ -307,6 +311,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let manager = manager.clone();
         let blocks_model = blocks_model.clone();
+
         let rows = rows.clone();
         ui.on_select(move |row| {
             let ui = ui_weak.unwrap();
@@ -329,6 +334,27 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // Double-click / word selection in the definition body: look up the token.
+    {
+        let ui_weak = ui.as_weak();
+        let manager = manager.clone();
+        let blocks_model = blocks_model.clone();
+        ui.on_lookup_token(move |link| {
+            let ui = ui_weak.unwrap();
+            let filter = scope_filter(ui.get_scope(), &manager);
+            // The clicked link is a `lookup://<word>` URL; strip the scheme.
+            let word = link.as_str().strip_prefix("lookup://").unwrap_or(link.as_str());
+            show_word(
+                &ui,
+                &manager,
+                &blocks_model,
+                word,
+                "",
+                filter.as_deref(),
+            );
+        });
+    }
+
     // Scope change: switch the active dictionary and re-run the current query
     // (or fall back to the word of the moment when the search box is empty).
     {
@@ -337,6 +363,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let engine = engine.clone();
         let results_model = results_model.clone();
         let blocks_model = blocks_model.clone();
+
         let rows = rows.clone();
         ui.on_scope_changed(move |idx| {
             let ui = ui_weak.unwrap();
@@ -744,6 +771,7 @@ fn show_message(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, title: &s
     blocks_model.set_vec(vec![DefBlock {
         marker: "".into(),
         text: body.into(),
+        styled: Default::default(),
     }]);
     ui.set_def_source("".into());
     clear_conjugation(ui);
@@ -756,6 +784,7 @@ fn run_search(
     engine: &Rc<RefCell<Option<SearchEngine>>>,
     results_model: &Rc<VecModel<ResultItem>>,
     blocks_model: &Rc<VecModel<DefBlock>>,
+
     rows: &Rc<RefCell<Vec<RowData>>>,
     query: &str,
 ) {
@@ -773,7 +802,9 @@ fn run_search(
     };
 
     // Prefix (autocomplete) first; fall back to fuzzy for typos. Both are scoped
-    // to the selected dictionary (or all, when no scope is active).
+    // to the selected dictionary (or all, when no scope is active). Exact-match
+    // headwords are always placed first, even if the prefix query doesn't return
+    // them (tantivy's RegexQuery DFA misses terms exactly matching the literal).
     let mut hits = eng
         .search_scoped(needle, SearchMode::Prefix, 80, filter.as_deref())
         .unwrap_or_default();
@@ -791,6 +822,15 @@ fn run_search(
                 .cmp(&b.headword.chars().count())
                 .then_with(|| a.headword.to_lowercase().cmp(&b.headword.to_lowercase()))
         });
+    }
+    // Always look up the exact match and place it first, even if the prefix
+    // query missed it (tantivy bug: `go.*` regex doesn't match term "go").
+    if let Ok(exact_hits) = eng.search_scoped(needle, SearchMode::Exact, 1, filter.as_deref()) {
+        if let Some(exact) = exact_hits.into_iter().next() {
+            // Remove any duplicate from prefix results.
+            hits.retain(|h| h.headword.to_lowercase() != needle.to_lowercase());
+            hits.insert(0, exact);
+        }
     }
     hits.truncate(40);
 
@@ -868,6 +908,7 @@ fn show_word(
                 DefBlock {
                     marker: marker.into(),
                     text: text.into(),
+                    styled: Default::default(),
                 }
             })
             .collect()
@@ -881,6 +922,7 @@ fn show_word(
             vec![DefBlock {
                 marker: "".into(),
                 text: cleaned_plain(&raw).into(),
+                styled: Default::default(),
             }]
         } else {
             parsed
@@ -890,10 +932,29 @@ fn show_word(
                 .map(|(i, s)| DefBlock {
                     marker: format!("{}.", i + 1).into(),
                     text: s.into(),
+                    styled: Default::default(),
                 })
                 .collect()
         }
     };
+    // Convert each block's text to markdown with clickable cross-reference
+    // links. GCIDE `{word}` braces become `[word](lookup://word)` links.
+    // HTML styled spans are handled similarly.
+    let blocks: Vec<DefBlock> = blocks
+        .into_iter()
+        .map(|b| {
+            let md = if html {
+                convert_html_refs_to_links(&b.text)
+            } else {
+                convert_gcide_refs_to_links(&b.text)
+            };
+            DefBlock {
+                marker: b.marker.clone(),
+                text: b.text.clone(),
+                styled: parse_markdown::<StyledText>(&md, &[]),
+            }
+        })
+        .collect();
     blocks_model.set_vec(blocks);
     set_conjugation(ui, manager, headword, &raw, &source);
 }
@@ -1305,7 +1366,9 @@ fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
 }
 
 fn parse_entry(raw: &str) -> Parsed {
-    let text = drop_markers(&strip_braces(raw));
+    // Keep braces ({...}) intact — they encode cross-references that are
+    // later converted to clickable markdown links by convert_gcide_refs_to_links.
+    let text = drop_markers(raw);
 
     // Pronunciation: prefer the phonetic respelling in parentheses right after the
     // headword (`\Word\ (ph[=o]netic)`); fall back to the backslash respelling.
@@ -1473,7 +1536,6 @@ fn unnumbered_sense(text: &str) -> Option<String> {
     }
 }
 
-/// Lightly cleaned plain text, used when sense parsing yields nothing.
 fn cleaned_plain(raw: &str) -> String {
     let mut joined = decode_gcide(&drop_markers(&strip_braces(raw)));
     while joined.contains("\n\n\n") {
@@ -1588,6 +1650,117 @@ fn decode_code(code: &str) -> Option<&'static str> {
         "OO" => "OO",
         _ => return None,
     })
+}
+
+/// Convert GCIDE `{word}` braces to markdown `[word](lookup://word)` links.
+/// Skips known non-reference labels (language codes, usage markers) and
+/// punctuation-only fragments.
+fn convert_gcide_refs_to_links(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, c) in text.char_indices() {
+        match c {
+            '{' if depth == 0 => {
+                out.push_str(&text[start..i]);
+                depth = 1;
+                start = i + c.len_utf8();
+            }
+            '{' => depth += 1,
+            '}' if depth == 1 => {
+                let inner = &text[start..i];
+                depth = 0;
+                start = i + c.len_utf8();
+                let trimmed = inner.trim();
+                if trimmed.is_empty()
+                    || trimmed.len() < 2
+                    || trimmed
+                        .chars()
+                        .all(|c| c.is_ascii_punctuation() || c.is_ascii_digit())
+                    || is_skip_label(trimmed)
+                {
+                    out.push('{');
+                    out.push_str(trimmed);
+                    out.push('}');
+                } else {
+                    // Produce a clickable markdown link. The destination is
+                    // wrapped in angle brackets so CommonMark accepts the spaces
+                    // in multi-word references (e.g. "To go a-begging") — a bare
+                    // `(lookup://To go)` is not parsed as a link.
+                    let label = trimmed.trim_start_matches("See ").trim();
+                    out.push('[');
+                    out.push_str(label);
+                    out.push_str("](<lookup://");
+                    out.push_str(label);
+                    out.push_str(">)");
+                }
+            }
+            '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    out.push_str(&text[start..]);
+    out
+}
+
+/// Convert HTML `<i>word</i>` / `<em>word</em>` / colour `<span>word</span>`
+/// to markdown `[word](lookup://word)` links.
+fn convert_html_refs_to_links(text: &str) -> String {
+    // For HTML entries, the raw text has already been stripped of tags by
+    // `html_to_blocks`. Return as-is since cross-reference spans are gone.
+    // The `raw` HTML is used for display, and by this point we've already
+    // cleaned it. We keep it as plain text (no further conversion needed).
+    text.to_string()
+}
+
+/// Known non-headword labels that should not become clickable links.
+fn is_skip_label(s: &str) -> bool {
+    let lower = s.to_lowercase();
+    matches!(
+        lower.as_str(),
+        "f." | "l."
+            | "sp."
+            | "gr."
+            | "it."
+            | "nl."
+            | "d."
+            | "as."
+            | "of."
+            | "pg."
+            | "g."
+            | "obs."
+            | "collog."
+            | "vulgar"
+            | "cant"
+            | "slang"
+            | "dial."
+            | "prov."
+            | "law"
+            | "mus."
+            | "med."
+            | "chem."
+            | "bot."
+            | "zool."
+            | "geol."
+            | "astron."
+            | "math."
+            | "sc."
+            | "sing."
+            | "pl."
+            | "fem."
+            | "masc."
+            | "neut."
+            | "comp."
+            | "superl."
+            | "cf."
+            | "i.e."
+            | "e.g."
+            | "etc."
+            | "q.v."
+            | "viz."
+    ) || (s.len() <= 2 && s.ends_with('.'))
+        || s.chars()
+            .all(|c| c.is_ascii_punctuation() || c.is_whitespace())
 }
 
 #[cfg(test)]

@@ -24,10 +24,12 @@ struct DictRow {
 
 // One block of a definition body. `marker` is the hanging sense marker shown in
 // the left column (a number like "1." or a bullet like "■"); empty for plain
-// paragraphs. The body is a list of these so it renders in a virtualized ListView.
+// paragraphs. `text` is the plain-text variant (used for snippets); `styled` is
+// the same content with cross-references converted to clickable markdown links.
 struct DefBlock {
     marker: string,
     text: string,
+    styled: styled-text,
 }
 
 // One conjugated form (e.g. "past" / "went", or "je" / "parle").
@@ -113,7 +115,7 @@ export component AppWindow inherits Window {
     callback query-changed(string);
     callback select(int);
     callback scope-changed(int);
-
+    callback lookup-token(string);
     callback open-settings();
     callback close-settings();
     callback toggle-dict(int);
@@ -380,7 +382,7 @@ export component AppWindow inherits Window {
                         font-size: 11px;
                         font-weight: 600;
                     }
-                    SelectableText {
+                    headword-sel := SelectableText {
                         text: def-headword;
                         font-size: 30px;
                         font-weight: 600;
@@ -445,7 +447,9 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // body: paragraphs / numbered senses (virtualized)
+                    // body: paragraphs / numbered senses (virtualized).
+                    // Each block renders as markdown so cross-references like
+                    // {tenir} become clickable inline links.
                     ListView {
                         vertical-stretch: 1;
                         for b[i] in def-blocks: HorizontalLayout {
@@ -461,11 +465,14 @@ export component AppWindow inherits Window {
                                 color: accent;
                                 width: b.marker != "" ? 24px : 0px;
                             }
-                            SelectableText {
-                                text: b.text;
-                                font-size: 16px;
-                                color: text-primary;
+                            StyledText {
+                                text: b.styled;
+                                default-color: text-primary;
+                                link-color: accent;
                                 horizontal-stretch: 1;
+                                link-clicked(link) => {
+                                    root.lookup-token(link);
+                                }
                             }
                         }
                     }
