@@ -1075,7 +1075,13 @@ fn compute_page(
             .into_iter()
             .map(|t| split_sense_marker(&t))
             .collect();
-        (pron, pos, etym, blocks)
+        // The header fields are shown as plain text, so drop any link sentinels.
+        (
+            strip_link_markers(&pron),
+            strip_link_markers(&pos),
+            strip_link_markers(&etym),
+            blocks,
+        )
     } else {
         let parsed = parse_entry(&raw);
         let blocks = if parsed.senses.is_empty() {
@@ -1093,15 +1099,16 @@ fn compute_page(
     };
 
     // Convert each block's text to markdown with clickable cross-reference links.
-    // GCIDE `{word}` braces become `[word](lookup://word)` links; HTML entries
-    // have already been stripped to plain text.
+    // GCIDE `{word}` braces and HTML `bword://` anchors (carried as `LINK_*`
+    // sentinels) both become `[word](lookup://word)` links; the block's plain
+    // `text` keeps the link label but not the markup.
     let blocks: Vec<RenderedBlock> = plain
         .into_iter()
         .map(|(marker, text)| {
-            let md = if html {
-                convert_html_refs_to_links(&text)
+            let (md, text) = if html {
+                (convert_html_refs_to_links(&text), strip_link_markers(&text))
             } else {
-                convert_gcide_refs_to_links(&text)
+                (convert_gcide_refs_to_links(&text), text)
             };
             RenderedBlock { marker, text, md }
         })
@@ -1459,6 +1466,11 @@ fn html_to_blocks(html: &str) -> Vec<String> {
     // letters are decorative glyphs, not text (some HTML dictionaries use a
     // Wingdings "v" as a section divider), so we suppress all output inside them.
     let mut symbol_depth = 0usize;
+    // Whether we're inside an `<a href="bword://…">` cross-reference. The tags are
+    // stripped like everything else, but we wrap the link text in sentinel markers
+    // (see `LINK_*`) so it survives flattening and can later become a clickable
+    // `lookup://` link, while still reading as plain text for snippets.
+    let mut link_open = false;
     while i < chars.len() {
         match chars[i] {
             '<' => {
@@ -1478,7 +1490,29 @@ fn html_to_blocks(html: &str) -> Vec<String> {
                     }
                 } else if tag_name(trimmed) == "font" && is_symbol_font(&tag.to_ascii_lowercase()) {
                     symbol_depth += 1;
+                } else if tag_name(trimmed) == "a" {
+                    if trimmed.starts_with('/') {
+                        // Closing </a>: end the link text.
+                        if link_open {
+                            cur.push(LINK_CLOSE);
+                            link_open = false;
+                        }
+                    } else if let Some(target) = bword_target(trimmed) {
+                        // Opening <a href="bword://target">: begin the link text.
+                        if link_open {
+                            cur.push(LINK_CLOSE);
+                        }
+                        cur.push(LINK_OPEN);
+                        cur.push_str(&target);
+                        cur.push(LINK_SEP);
+                        link_open = true;
+                    }
+                    // Anchors without a bword href are dropped, keeping their text.
                 } else if is_block_tag(&tag) {
+                    if link_open {
+                        cur.push(LINK_CLOSE);
+                        link_open = false;
+                    }
                     flush_paragraph(&mut cur, &mut paras);
                 }
                 i = if j < chars.len() { j + 1 } else { j };
@@ -1511,6 +1545,9 @@ fn html_to_blocks(html: &str) -> Vec<String> {
                 i += 1;
             }
         }
+    }
+    if link_open {
+        cur.push(LINK_CLOSE);
     }
     flush_paragraph(&mut cur, &mut paras);
 
@@ -1938,7 +1975,7 @@ fn make_snippet(raw: &str) -> String {
         if blocks.len() > 1 {
             blocks.remove(0);
         }
-        blocks.join(" ")
+        strip_link_markers(&blocks.join(" "))
     } else {
         let flat = collapse_ws(&strip_braces(raw));
         let start = flat.find(" 1. ").map(|i| i + 4).unwrap_or(0);
@@ -2087,14 +2124,115 @@ fn convert_gcide_refs_to_links(text: &str) -> String {
     out
 }
 
-/// Convert HTML `<i>word</i>` / `<em>word</em>` / colour `<span>word</span>`
-/// to markdown `[word](lookup://word)` links.
+// Sentinel chars (Unicode private-use area, so they never appear in dictionary
+// text) that `html_to_blocks` wraps around a cross-reference: the link text reads
+// as plain text between them, while the markers let us recover the link target
+// after the HTML has been flattened. Layout: OPEN target SEP label CLOSE.
+const LINK_OPEN: char = '\u{E000}';
+const LINK_SEP: char = '\u{E001}';
+const LINK_CLOSE: char = '\u{E002}';
+
+/// Extract the cross-reference target from an `<a …>` tag whose `href` uses the
+/// StarDict `bword://` scheme, percent-decoded. `None` for anchors without such a
+/// href (e.g. `<a name=…>` or external links), which are dropped without linking.
+fn bword_target(tag: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    // `to_ascii_lowercase` preserves byte length, so indices map back to `tag`.
+    let href = lower.find("href")?;
+    let eq = tag[href..].find('=')? + href;
+    let rest = tag[eq + 1..].trim_start();
+    let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let body = &rest[quote.len_utf8()..];
+    let end = body.find(quote)?;
+    let value = &body[..end];
+    if !value.to_ascii_lowercase().starts_with("bword://") {
+        return None;
+    }
+    let target = percent_decode(&value["bword://".len()..]);
+    let target = target.trim();
+    (!target.is_empty()).then(|| target.to_string())
+}
+
+/// Decode `%XX` escapes in a URL path into UTF-8 (cross-reference targets are
+/// occasionally percent-encoded, e.g. for spaces or accents).
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Walk text containing `LINK_*` sentinels, rendering each cross-reference either
+/// as a markdown `[label](<lookup://target>)` link (`as_markdown`) or as its bare
+/// label (for plain-text uses like snippets). Stray/unbalanced markers are dropped.
+fn render_links(text: &str, as_markdown: bool) -> String {
+    if !text.contains(LINK_OPEN) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != LINK_OPEN {
+            // Drop stray separators/closers; copy everything else verbatim.
+            if c != LINK_SEP && c != LINK_CLOSE {
+                out.push(c);
+            }
+            continue;
+        }
+        let mut target = String::new();
+        for c in chars.by_ref() {
+            if c == LINK_SEP || c == LINK_CLOSE {
+                break;
+            }
+            target.push(c);
+        }
+        let mut label = String::new();
+        for c in chars.by_ref() {
+            if c == LINK_CLOSE {
+                break;
+            }
+            label.push(c);
+        }
+        if label.is_empty() {
+            continue;
+        }
+        if as_markdown && !target.is_empty() {
+            // Angle-bracketed destination so multi-word targets (with spaces) parse.
+            out.push('[');
+            out.push_str(&label);
+            out.push_str("](<lookup://");
+            out.push_str(&target);
+            out.push_str(">)");
+        } else {
+            out.push_str(&label);
+        }
+    }
+    out
+}
+
+/// Turn the cross-reference sentinels left by `html_to_blocks` into clickable
+/// markdown links.
 fn convert_html_refs_to_links(text: &str) -> String {
-    // For HTML entries, the raw text has already been stripped of tags by
-    // `html_to_blocks`. Return as-is since cross-reference spans are gone.
-    // The `raw` HTML is used for display, and by this point we've already
-    // cleaned it. We keep it as plain text (no further conversion needed).
-    text.to_string()
+    render_links(text, true)
+}
+
+/// Strip the cross-reference sentinels, keeping the link text — for plain-text
+/// uses (result snippets, the block's selectable text, header fields).
+fn strip_link_markers(text: &str) -> String {
+    render_links(text, false)
 }
 
 /// Known non-headword labels that should not become clickable links.
@@ -2257,5 +2395,45 @@ mod tests {
                    1. One of two.\n";
         let parsed = parse_entry(raw);
         assert_eq!(parsed.pronunciation, "ē·thẽr");
+    }
+
+    #[test]
+    fn html_bword_anchor_becomes_lookup_link() {
+        // A StarDict cross-reference (`<a href="bword://…">`) survives flattening
+        // as link sentinels, then converts to a clickable lookup link; the plain
+        // text keeps just the label.
+        let html = "<DIV>voir <A HREF=\"bword://alpha\">alpha</A> et \
+                    <SPAN style=\"color: maroon\"><a href=\"bword://beta gamma\">beta gamma</a></SPAN>.</DIV>";
+        let blocks = html_to_blocks(html);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            convert_html_refs_to_links(&blocks[0]),
+            "voir [alpha](<lookup://alpha>) et [beta gamma](<lookup://beta gamma>)."
+        );
+        assert_eq!(strip_link_markers(&blocks[0]), "voir alpha et beta gamma.");
+        // No sentinel chars leak into the plain text.
+        let plain = strip_link_markers(&blocks[0]);
+        assert!(!plain.contains(LINK_OPEN) && !plain.contains(LINK_SEP) && !plain.contains(LINK_CLOSE));
+    }
+
+    #[test]
+    fn non_bword_anchors_are_not_linked() {
+        // Anchors without a bword href (external links, named anchors) keep their
+        // text but produce no link.
+        let html = "<DIV><a href=\"http://example.com\">site</a> <a name=\"x\">anchor</a></DIV>";
+        let blocks = html_to_blocks(html);
+        assert_eq!(blocks[0], "site anchor");
+        assert_eq!(convert_html_refs_to_links(&blocks[0]), "site anchor");
+    }
+
+    #[test]
+    fn bword_target_decodes_percent_escapes() {
+        assert_eq!(
+            bword_target("a href=\"bword://aller%20%C3%A0\"").as_deref(),
+            Some("aller à")
+        );
+        assert_eq!(bword_target("A HREF=\"bword://chien\"").as_deref(), Some("chien"));
+        assert_eq!(bword_target("a href=\"http://x\""), None);
+        assert_eq!(bword_target("a name=\"y\""), None);
     }
 }
