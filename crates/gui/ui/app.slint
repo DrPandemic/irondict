@@ -112,10 +112,16 @@ export component AppWindow inherits Window {
     in property <[color]> accent-swatches;
     in property <int> accent-choice: 0;       // 0 System, n = swatch n-1
 
+    // Back/forward navigation through visited definition pages.
+    in property <bool> can-go-back: false;
+    in property <bool> can-go-forward: false;
+
     callback query-changed(string);
     callback select(int);
     callback scope-changed(int);
     callback lookup-token(string);
+    callback navigate-back();
+    callback navigate-forward();
     callback open-settings();
     callback close-settings();
     callback toggle-dict(int);
@@ -144,7 +150,7 @@ export component AppWindow inherits Window {
     // Escape (close the topmost popup) and Up/Down (move through the results).
     // Returns true when the key was handled. Shared by the search field — which
     // gets first dibs on keys while focused — and the outer FocusScope.
-    function handle-nav-key(text: string) -> bool {
+    function handle-nav-key(text: string, alt: bool) -> bool {
         if (text == Key.Escape) {
             if (root.show-conjugation) {
                 root.show-conjugation = false;
@@ -155,6 +161,17 @@ export component AppWindow inherits Window {
                 return true;
             }
             return false;
+        }
+        // Alt+Left/Right: back/forward through the page history.
+        if (alt && !root.show-settings && !root.show-conjugation) {
+            if (text == Key.LeftArrow) {
+                root.navigate-back();
+                return true;
+            }
+            if (text == Key.RightArrow) {
+                root.navigate-forward();
+                return true;
+            }
         }
         if (!root.show-settings && !root.show-conjugation && root.results.length > 0) {
             if (text == Key.DownArrow) {
@@ -173,7 +190,7 @@ export component AppWindow inherits Window {
 
     FocusScope {
         key-pressed(event) => {
-            if (root.handle-nav-key(event.text)) {
+            if (root.handle-nav-key(event.text, event.modifiers.alt)) {
                 return EventResult.accept;
             }
             // Ctrl+1 = All, Ctrl+2 = first dictionary, …; Ctrl+Tab cycles.
@@ -188,6 +205,20 @@ export component AppWindow inherits Window {
             }
             return EventResult.reject;
         }
+
+        // Map the mouse back/forward buttons onto page navigation. The scrollable
+        // body (Flickable) forwards non-left buttons, so this outer TouchArea
+        // still sees them while reading a definition.
+        TouchArea {
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    if (event.button == PointerEventButton.back) {
+                        root.navigate-back();
+                    } else if (event.button == PointerEventButton.forward) {
+                        root.navigate-forward();
+                    }
+                }
+            }
 
         VerticalLayout {
         // ===================== toolbar =====================
@@ -285,7 +316,7 @@ export component AppWindow inherits Window {
                             // key-pressed runs before it consumes the arrows for
                             // cursor movement, so the FocusScope never sees them.
                             key-pressed(event) => {
-                                root.handle-nav-key(event.text)
+                                root.handle-nav-key(event.text, event.modifiers.alt)
                                     ? EventResult.accept
                                     : EventResult.reject;
                             }
@@ -501,6 +532,7 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+        }
         }
         }
     }

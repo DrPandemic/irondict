@@ -41,6 +41,56 @@ struct RowData {
     headword: String,
 }
 
+/// One visited definition page, captured so back/forward can replay it. `scope`
+/// is the dictionary scope index that was active, so navigation is faithful even
+/// if the user later switches dictionaries.
+#[derive(Clone)]
+struct NavEntry {
+    headword: String,
+    label: String,
+    scope: i32,
+}
+
+/// Browser-style back/forward stack over the definition pages. `cursor` indexes
+/// the page currently shown; pushing a new page truncates any forward history.
+#[derive(Default)]
+struct NavHistory {
+    entries: Vec<NavEntry>,
+    cursor: usize,
+}
+
+impl NavHistory {
+    fn current(&self) -> Option<&NavEntry> {
+        self.entries.get(self.cursor)
+    }
+
+    fn can_back(&self) -> bool {
+        !self.entries.is_empty() && self.cursor > 0
+    }
+
+    fn can_forward(&self) -> bool {
+        self.cursor + 1 < self.entries.len()
+    }
+
+    /// Record a freshly-shown page, unless it repeats the current one. Drops any
+    /// forward history (the user navigated somewhere new).
+    fn push(&mut self, entry: NavEntry) {
+        if let Some(cur) = self.current() {
+            if cur.headword == entry.headword
+                && cur.label == entry.label
+                && cur.scope == entry.scope
+            {
+                return;
+            }
+        }
+        if !self.entries.is_empty() {
+            self.entries.truncate(self.cursor + 1);
+        }
+        self.entries.push(entry);
+        self.cursor = self.entries.len() - 1;
+    }
+}
+
 /// Load the manager from the persisted config, seeding bundled GCIDE on first
 /// run (mirrors the CLI). Per-dictionary load failures are warnings, not fatal.
 fn load_manager() -> DictionaryManager {
@@ -148,6 +198,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let blocks_model: Rc<VecModel<DefBlock>> = Rc::new(VecModel::default());
     ui.set_def_blocks(ModelRc::from(blocks_model.clone()));
     let rows: Rc<RefCell<Vec<RowData>>> = Rc::new(RefCell::new(Vec::new()));
+    let history: Rc<RefCell<NavHistory>> = Rc::new(RefCell::new(NavHistory::default()));
     let dict_items: Rc<VecModel<DictRow>> = Rc::new(VecModel::default());
     ui.set_dict_items(ModelRc::from(dict_items.clone()));
     let scopes: Rc<VecModel<SharedString>> = Rc::new(VecModel::default());
@@ -187,10 +238,11 @@ fn main() -> Result<(), slint::PlatformError> {
         .map(|d| d.subsec_nanos() as usize)
         .unwrap_or(0);
     let (wotm, wotm_src) = word_of_the_moment(&manager, ui.get_scope(), seed);
-    show_word(
+    navigate(
         &ui,
         &manager,
         &blocks_model,
+        &history,
         &wotm,
         "WORD OF THE MOMENT",
         wotm_src.as_deref(),
@@ -216,7 +268,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let engine = engine.clone();
         let results_model = results_model.clone();
         let blocks_model = blocks_model.clone();
-
+        let history = history.clone();
         let rows = rows.clone();
         index_timer.start(
             TimerMode::Repeated,
@@ -234,6 +286,7 @@ fn main() -> Result<(), slint::PlatformError> {
                             &engine,
                             &results_model,
                             &blocks_model,
+                            &history,
                             &rows,
                             &q,
                         );
@@ -256,7 +309,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let engine = engine.clone();
         let results_model = results_model.clone();
         let blocks_model = blocks_model.clone();
-
+        let history = history.clone();
         let rows = rows.clone();
         // Debounce: keep typing responsive by deferring the (render-heavy) search
         // until the user pauses, instead of running it on every keystroke.
@@ -270,10 +323,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 rows.borrow_mut().clear();
                 ui.set_selected_index(-1);
                 let (wotm, wotm_src) = word_of_the_moment(&manager, ui.get_scope(), seed);
-                show_word(
+                navigate(
                     &ui,
                     &manager,
                     &blocks_model,
+                    &history,
                     &wotm,
                     "WORD OF THE MOMENT",
                     wotm_src.as_deref(),
@@ -285,7 +339,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let engine = engine.clone();
             let results_model = results_model.clone();
             let blocks_model = blocks_model.clone();
-
+            let history = history.clone();
             let rows = rows.clone();
             debounce.start(
                 TimerMode::SingleShot,
@@ -298,6 +352,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         &engine,
                         &results_model,
                         &blocks_model,
+                        &history,
                         &rows,
                         &ui.get_query(),
                     );
@@ -311,7 +366,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let manager = manager.clone();
         let blocks_model = blocks_model.clone();
-
+        let history = history.clone();
         let rows = rows.clone();
         ui.on_select(move |row| {
             let ui = ui_weak.unwrap();
@@ -322,10 +377,11 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(headword) = headword {
                 let filter = scope_filter(ui.get_scope(), &manager);
                 ui.set_selected_index(row);
-                show_word(
+                navigate(
                     &ui,
                     &manager,
                     &blocks_model,
+                    &history,
                     &headword,
                     "",
                     filter.as_deref(),
@@ -339,15 +395,17 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let manager = manager.clone();
         let blocks_model = blocks_model.clone();
+        let history = history.clone();
         ui.on_lookup_token(move |link| {
             let ui = ui_weak.unwrap();
             let filter = scope_filter(ui.get_scope(), &manager);
             // The clicked link is a `lookup://<word>` URL; strip the scheme.
             let word = link.as_str().strip_prefix("lookup://").unwrap_or(link.as_str());
-            show_word(
+            navigate(
                 &ui,
                 &manager,
                 &blocks_model,
+                &history,
                 word,
                 "",
                 filter.as_deref(),
@@ -363,7 +421,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let engine = engine.clone();
         let results_model = results_model.clone();
         let blocks_model = blocks_model.clone();
-
+        let history = history.clone();
         let rows = rows.clone();
         ui.on_scope_changed(move |idx| {
             let ui = ui_weak.unwrap();
@@ -380,10 +438,11 @@ fn main() -> Result<(), slint::PlatformError> {
             if q.trim().is_empty() {
                 // The word of the moment follows the newly-selected dictionary.
                 let (wotm, wotm_src) = word_of_the_moment(&manager, idx, seed);
-                show_word(
+                navigate(
                     &ui,
                     &manager,
                     &blocks_model,
+                    &history,
                     &wotm,
                     "WORD OF THE MOMENT",
                     wotm_src.as_deref(),
@@ -395,10 +454,57 @@ fn main() -> Result<(), slint::PlatformError> {
                     &engine,
                     &results_model,
                     &blocks_model,
+                    &history,
                     &rows,
                     &q,
                 );
             }
+        });
+    }
+
+    // Back / forward through the visited-page history (Alt+Left/Right or the
+    // mouse back/forward buttons). These replay a stored page without pushing a
+    // new history entry.
+    {
+        let ui_weak = ui.as_weak();
+        let manager = manager.clone();
+        let blocks_model = blocks_model.clone();
+        let history = history.clone();
+        ui.on_navigate_back(move || {
+            let ui = ui_weak.unwrap();
+            let entry = {
+                let mut h = history.borrow_mut();
+                if !h.can_back() {
+                    return;
+                }
+                h.cursor -= 1;
+                h.current().cloned()
+            };
+            if let Some(e) = entry {
+                replay(&ui, &manager, &blocks_model, &e);
+            }
+            sync_nav_state(&ui, &history);
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let manager = manager.clone();
+        let blocks_model = blocks_model.clone();
+        let history = history.clone();
+        ui.on_navigate_forward(move || {
+            let ui = ui_weak.unwrap();
+            let entry = {
+                let mut h = history.borrow_mut();
+                if !h.can_forward() {
+                    return;
+                }
+                h.cursor += 1;
+                h.current().cloned()
+            };
+            if let Some(e) = entry {
+                replay(&ui, &manager, &blocks_model, &e);
+            }
+            sync_nav_state(&ui, &history);
         });
     }
 
@@ -778,13 +884,14 @@ fn show_message(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, title: &s
 }
 
 /// Run a query through the engine and update the list + definition pane.
+#[allow(clippy::too_many_arguments)]
 fn run_search(
     ui: &AppWindow,
     manager: &Rc<RefCell<DictionaryManager>>,
     engine: &Rc<RefCell<Option<SearchEngine>>>,
     results_model: &Rc<VecModel<ResultItem>>,
     blocks_model: &Rc<VecModel<DefBlock>>,
-
+    history: &Rc<RefCell<NavHistory>>,
     rows: &Rc<RefCell<Vec<RowData>>>,
     query: &str,
 ) {
@@ -852,10 +959,11 @@ fn run_search(
 
     if let Some(first) = hits.first() {
         ui.set_selected_index(0);
-        show_word(
+        navigate(
             ui,
             manager,
             blocks_model,
+            history,
             &first.headword,
             "",
             filter.as_deref(),
@@ -869,6 +977,55 @@ fn run_search(
             &format!("Nothing matches \u{201c}{needle}\u{201d}."),
         );
     }
+}
+
+/// Show a page and record it in the navigation history, so it can be revisited
+/// with back/forward. Use this for every user-initiated navigation; the
+/// back/forward handlers call `show_word` directly so they don't re-push.
+fn navigate(
+    ui: &AppWindow,
+    manager: &Rc<RefCell<DictionaryManager>>,
+    blocks_model: &Rc<VecModel<DefBlock>>,
+    history: &Rc<RefCell<NavHistory>>,
+    headword: &str,
+    label: &str,
+    filter: Option<&str>,
+) {
+    show_word(ui, manager, blocks_model, headword, label, filter);
+    history.borrow_mut().push(NavEntry {
+        headword: headword.to_string(),
+        label: label.to_string(),
+        scope: ui.get_scope(),
+    });
+    sync_nav_state(ui, history);
+}
+
+/// Re-show a stored history page (for back/forward), restoring the dictionary
+/// scope it was viewed under. Does not touch the history stack.
+fn replay(
+    ui: &AppWindow,
+    manager: &Rc<RefCell<DictionaryManager>>,
+    blocks_model: &Rc<VecModel<DefBlock>>,
+    entry: &NavEntry,
+) {
+    ui.set_scope(entry.scope);
+    let filter = scope_filter(entry.scope, manager);
+    show_word(
+        ui,
+        manager,
+        blocks_model,
+        &entry.headword,
+        &entry.label,
+        filter.as_deref(),
+    );
+}
+
+/// Mirror whether back/forward are possible onto the UI (drives the toolbar
+/// buttons' enabled state).
+fn sync_nav_state(ui: &AppWindow, history: &Rc<RefCell<NavHistory>>) {
+    let h = history.borrow();
+    ui.set_can_go_back(h.can_back());
+    ui.set_can_go_forward(h.can_forward());
 }
 
 /// Resolve `headword` to its full definition, parse it, and show it.
