@@ -55,7 +55,7 @@ so both share the same backend).
 - `Entry { headword: String, definition: Definition }` where `Definition` keeps
   the StarDict data type (plain text / HTML / etc.) so the GUI can render richly.
 - `Dictionary` — one loaded dictionary: metadata (name, language pair, word count)
-  + lookup over its entries.
+  - lookup over its entries.
 - `DictionaryManager` — owns multiple `Dictionary` instances; aggregates searches
   across the enabled ones; add/remove/enable.
 - `Config` — persisted list of dictionary paths + enabled state, stored in the OS
@@ -157,7 +157,7 @@ so both share the same backend).
     the signature matches and rebuilds otherwise, so add/remove/enable/disable
     invalidate it automatically. `build` clears any stale index dir to stay idempotent.
   - Verified: `cargo test -p irondict-core` (34 tests, incl. `tests/search_test.rs`
-    + `levenshtein` unit tests), `cargo clippy --workspace --all-targets` and
+    - `levenshtein` unit tests), `cargo clippy --workspace --all-targets` and
     `cargo fmt --check` clean on 1.96.0. End-to-end against bundled GCIDE in an
     isolated `XDG_CONFIG_HOME`/`XDG_CACHE_HOME`: fuzzy `baba`→`Baba` ranked first,
     `dictionarie`→`Dictionaries`(1 edit) above `Dictionary`(2 edits), prefix
@@ -266,7 +266,7 @@ so both share the same backend).
     section = a scrollable list of cards (name + grouped word count, a language
     `ComboBox`, an enable `Switch`, and a remove ✕) plus an **Add dictionary…** button;
     Appearance section = a System/Light/Dark segmented control and an accent row (Auto
-    + preset swatches). All driven by new properties (`dict-items: [DictRow]`,
+    - preset swatches). All driven by new properties (`dict-items: [DictRow]`,
     `theme-mode`, `accent-swatches`, `accent-choice`) and callbacks.
   - **Wiring** (`crates/gui/src/main.rs`): add uses the **`rfd`** portal file picker on
     a worker thread (path returned over a channel, applied on the UI thread by a
@@ -346,8 +346,56 @@ so both share the same backend).
   `conjugation/tests.rs` (9 tests over GCIDE-style fixtures + a French table). CLI
   `conjugate [--lang en|fr]`; GUI conjugation button + overlay.
 
-- [ ] **Phase 9 — Polish.** Rich definition rendering (HTML/markup data types,
-  including GCIDE's markup), search history, packaging of GCIDE.
+- [ ] **Phase 9 — Polish.** Rich definition rendering and navigation. Already done
+  this round (GUI): HTML entries lift the pronunciation / part-of-speech /
+  etymology onto the header (matching GCIDE), Wingdings dividers dropped, sense
+  markers (bullets + arabic numbers) moved into a hanging marker column, the
+  word-of-the-moment follows the chosen dictionary (scoped lookup so formats no
+  longer mix), empty header lines collapse (`if`, not `visible`), and keyboard
+  navigation (↑/↓ through results with scroll-into-view, Esc closes overlays).
+  Remaining items:
+
+  - [ ] **Clickable cross-references.** Two complementary mechanisms, since Slint
+    cannot colour or hit-test individual words inside wrapping prose (no inline-run
+    layout): (1) **double-click any body word** to look it up — the body
+    `SelectableText` reports the selected slice (`lookup-token` with byte offsets);
+    multi-word drag-selections contain whitespace and are rejected, so copying a
+    phrase doesn't trigger a look-up; the active word highlights in the accent
+    colour. (2) A **"Related" chip row** of the references the entry marks up —
+    colour/italic spans for HTML entries, `{…}` braces for GCIDE — **filtered to
+    terms that actually resolve** in the active scope so chips never dead-end (e.g.
+    on an etymology entry the language labels `latin`/`español` drop out and the real
+    cross-referenced words `tenir`/`devoir`/`dette` remain). Both record history.
+  - [ ] **Synonym styling.** The resolved cross-references render as accent-coloured
+    "Related" chips (clickable), visually distinct from the prose. This is the
+    Slint-feasible form of "styled links" — inline per-word colouring isn't possible.
+  - [ ] **Back / forward history.** Browser-style stack of viewed entries
+    (`History` in the GUI), recorded on every selection (result click + arrow-nav,
+    and later cross-references). Navigate with the keyboard (Alt+← / Alt+→, and
+    Backspace when the search box isn't focused) **and** ‹ / › buttons in the
+    toolbar (greyed out at the ends). Restores the entry and its scope; the body
+    scroll resets to the top on each new entry (`changed def-blocks`).
+  - [ ] **Italic examples / quotations.** Petit Robert italicises examples; GCIDE
+    currently *drops* its quotations — show them instead in a lighter italic style.
+    Per-block styling (a block carries a style kind), since Slint can't mix font
+    runs inside a single `Text`.
+  - [ ] **Synonym styling.** Render the cross-reference / synonym runs in the accent
+    (or secondary) colour so they read as distinct from the definition prose; ties
+    in with the clickable-cross-reference span model above.
+  - [ ] **Packaging.** Distributable build: bundle the GCIDE asset cleanly with
+    license + provenance docs (GPL-2.0-or-later, recorded in `docs/`), an app icon,
+    a Linux `.desktop` entry, and a release profile / packaging recipe.
+
+  Deferred: search history (recently-viewed when the box is empty) — largely covered
+  by back/forward history + word-of-the-moment.
+
+- [ ] **Phase 10 — CLI `--dict` single-dictionary scope.** A `--dict <name>` flag on
+  the read commands (`lookup`, `search`, `conjugate`) restricting them to one
+  dictionary instead of aggregating across all enabled ones (mirrors the GUI scope
+  control). Matches against the dictionary name shown by `list`; an unknown name is a
+  hard error (not an empty result). `lookup`/`conjugate` filter the manager's enabled
+  set before querying; `search` scopes via the existing tantivy `dictionary` field
+  (no separate index). Leaves the default (no flag = all enabled) unchanged.
 
 ## Critical files (to be created)
 
