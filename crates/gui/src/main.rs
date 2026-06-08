@@ -5,7 +5,7 @@
 // a worker thread; the window appears immediately (showing the word of the
 // moment) and search becomes live once the index is ready.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -39,6 +39,104 @@ slint::include_modules!();
 /// Backing data for a results row, so a click can resolve the full definition.
 struct RowData {
     headword: String,
+}
+
+// ---- threaded search/render pipeline ----
+//
+// The expensive work — the tantivy query, the disk read of the full entry, HTML
+// stripping, snippet building and conjugation — runs on a dedicated worker
+// thread so it never blocks the UI thread while the user is typing. The worker
+// owns its own `DictionaryManager` + `SearchEngine` and produces plain,
+// `Send`-able render data; the UI thread only assembles the (non-`Send`) Slint
+// models from it. Synchronous user actions (clicks, links, back/forward) render
+// on the UI thread through the same `compute_page`/`apply_page` split, using the
+// UI's own manager.
+
+/// One result-list row, computed off the UI thread.
+struct RenderedItem {
+    headword: String,
+    snippet: String,
+    source: String,
+}
+
+/// One definition body block, with the markdown source (cross-reference links)
+/// kept as a plain string; the (non-`Send`) styled text is parsed on the UI
+/// thread in `apply_page`.
+struct RenderedBlock {
+    marker: String,
+    text: String,
+    md: String,
+}
+
+struct RenderedConjForm {
+    label: String,
+    text: String,
+}
+
+struct RenderedConjSection {
+    label: String,
+    forms: Vec<RenderedConjForm>,
+}
+
+/// The body of a rendered page: either a real entry or a plain message.
+enum PageBody {
+    Entry {
+        pron: String,
+        pos: String,
+        etym: String,
+        blocks: Vec<RenderedBlock>,
+        conjugation: Vec<RenderedConjSection>,
+    },
+    Message {
+        body: String,
+    },
+}
+
+/// A fully-computed definition page, ready for `apply_page` to push into the UI.
+struct RenderedPage {
+    section_label: String,
+    /// The `def-headword` line — the entry's headword, or a message title.
+    headword: String,
+    source: String,
+    body: PageBody,
+}
+
+/// The outcome of a search: the result list, the rendered first page (the first
+/// hit, or a "no results" message), and the first hit's headword when there is
+/// one (so the UI can select it and record it in history).
+struct RenderedResults {
+    items: Vec<RenderedItem>,
+    first_headword: Option<String>,
+    page: RenderedPage,
+}
+
+/// A request from the UI thread to the search worker.
+enum WorkerReq {
+    /// Run `query` (scoped to `scope` when set); `gen` lets the UI drop stale
+    /// responses once the user has typed more.
+    Search {
+        gen: u64,
+        query: String,
+        scope: Option<String>,
+    },
+    /// Re-read the manager from the saved config (e.g. a language pin changed);
+    /// when `rebuild` is set, also rebuild the search index (dictionary set
+    /// changed).
+    Reload { rebuild: bool },
+    /// Stop the worker (on shutdown).
+    Shutdown,
+}
+
+/// A message from the search worker back to the UI thread.
+enum WorkerMsg {
+    Results {
+        gen: u64,
+        results: Box<RenderedResults>,
+    },
+    /// A search arrived before the index was ready.
+    NoEngine { gen: u64 },
+    IndexReady,
+    BuildError(String),
 }
 
 /// One visited definition page, captured so back/forward can replay it. `scope`
@@ -141,12 +239,14 @@ fn index_signature(manager: &DictionaryManager) -> String {
     lines.join("\n")
 }
 
-/// Open the cached index when it matches the current (on-disk) dictionary set,
-/// otherwise build it. Warmed before returning so the first keystroke is snappy.
-fn open_or_build_index() -> Result<SearchEngine, String> {
+/// Open the cached index for `manager` when it matches the current dictionary
+/// set, otherwise (re)build it and refresh the manifest. Warmed before returning
+/// so the first keystroke is snappy. Runs on the worker thread with the worker's
+/// own manager, so the same call covers first launch and post-settings rebuilds
+/// (a changed dictionary set yields a new signature, which forces a rebuild).
+fn prepare_engine(manager: &mut DictionaryManager) -> Result<SearchEngine, String> {
     let dir = search::default_index_dir().map_err(|e| e.to_string())?;
-    let mut manager = load_manager();
-    let signature = index_signature(&manager);
+    let signature = index_signature(manager);
     let cached = std::fs::read_to_string(dir.join("manifest")).ok();
     if cached.as_deref() == Some(signature.as_str()) {
         if let Ok(engine) = SearchEngine::open(&dir) {
@@ -154,28 +254,64 @@ fn open_or_build_index() -> Result<SearchEngine, String> {
             return Ok(engine);
         }
     }
-    build_engine(&dir, &mut manager, &signature)
-}
-
-/// Build the index from `manager`, write the manifest, and warm it.
-fn build_engine(
-    dir: &std::path::Path,
-    manager: &mut DictionaryManager,
-    signature: &str,
-) -> Result<SearchEngine, String> {
-    let engine = SearchEngine::build(dir, manager).map_err(|e| e.to_string())?;
-    let _ = std::fs::write(dir.join("manifest"), signature);
+    let engine = SearchEngine::build(&dir, manager).map_err(|e| e.to_string())?;
+    let _ = std::fs::write(dir.join("manifest"), &signature);
     warm_up(&engine);
     Ok(engine)
 }
 
-/// Rebuild the index from the freshly-saved config (used after the user changes
-/// the dictionary set). Loads its own manager so it can run on a worker thread.
-fn rebuild_index() -> Result<SearchEngine, String> {
-    let dir = search::default_index_dir().map_err(|e| e.to_string())?;
+/// The search worker: owns its own manager + index and serves search/lookup work
+/// off the UI thread. It builds the index first (reporting `IndexReady` or
+/// `BuildError`), then processes requests until the UI drops the request channel
+/// or sends `Shutdown`. The manager is reloaded from the saved config on
+/// `Reload`, and the index rebuilt when the dictionary set changed.
+fn run_worker(req_rx: mpsc::Receiver<WorkerReq>, resp_tx: mpsc::Sender<WorkerMsg>) {
     let mut manager = load_manager();
-    let signature = index_signature(&manager);
-    build_engine(&dir, &mut manager, &signature)
+    let mut engine: Option<SearchEngine> = None;
+    match prepare_engine(&mut manager) {
+        Ok(e) => {
+            engine = Some(e);
+            let _ = resp_tx.send(WorkerMsg::IndexReady);
+        }
+        Err(msg) => {
+            let _ = resp_tx.send(WorkerMsg::BuildError(msg));
+        }
+    }
+
+    while let Ok(req) = req_rx.recv() {
+        match req {
+            WorkerReq::Search { gen, query, scope } => match &engine {
+                Some(eng) => {
+                    let results = compute_search(eng, &mut manager, &query, scope.as_deref());
+                    let _ = resp_tx.send(WorkerMsg::Results {
+                        gen,
+                        results: Box::new(results),
+                    });
+                }
+                None => {
+                    let _ = resp_tx.send(WorkerMsg::NoEngine { gen });
+                }
+            },
+            WorkerReq::Reload { rebuild } => {
+                // Pick up any language pins / dictionary-set changes the UI saved.
+                manager = load_manager();
+                if rebuild {
+                    // The old index keeps serving queued searches only after this
+                    // returns; while it builds the UI shows "Indexing…".
+                    match prepare_engine(&mut manager) {
+                        Ok(e) => {
+                            engine = Some(e);
+                            let _ = resp_tx.send(WorkerMsg::IndexReady);
+                        }
+                        Err(msg) => {
+                            let _ = resp_tx.send(WorkerMsg::BuildError(msg));
+                        }
+                    }
+                }
+            }
+            WorkerReq::Shutdown => break,
+        }
+    }
 }
 
 /// Run throwaway queries so the first real search doesn't pay the one-time cost
@@ -192,7 +328,6 @@ fn main() -> Result<(), slint::PlatformError> {
     // detected and applied below, off the startup path.
 
     let manager = Rc::new(RefCell::new(load_manager()));
-    let engine: Rc<RefCell<Option<SearchEngine>>> = Rc::new(RefCell::new(None));
     let results_model: Rc<VecModel<ResultItem>> = Rc::new(VecModel::default());
     ui.set_results(ModelRc::from(results_model.clone()));
     let blocks_model: Rc<VecModel<DefBlock>> = Rc::new(VecModel::default());
@@ -248,76 +383,102 @@ fn main() -> Result<(), slint::PlatformError> {
         wotm_src.as_deref(),
     );
 
-    // Build/open the index off the UI thread; deliver it via a channel. The
-    // sender is kept (wrapped in an `Rc`) so settings changes can request a
-    // rebuild on the same channel.
-    let (tx, rx) = mpsc::channel::<Result<SearchEngine, String>>();
-    let tx = Rc::new(tx);
-    {
-        let tx = mpsc::Sender::clone(&tx);
-        std::thread::spawn(move || {
-            let _ = tx.send(open_or_build_index());
-        });
-    }
+    // Spin up the search worker. It builds/opens the index and runs every search
+    // and first-result render off the UI thread, so typing never blocks. Requests
+    // go out on `req_tx`; results come back on `resp_rx`, drained by a fast timer.
+    // `gen` tags each search so stale responses (the user kept typing) are dropped.
+    let (req_tx, req_rx) = mpsc::channel::<WorkerReq>();
+    let (resp_tx, resp_rx) = mpsc::channel::<WorkerMsg>();
+    let req_tx = Rc::new(req_tx);
+    let gen = Rc::new(Cell::new(0u64));
+    std::thread::spawn(move || run_worker(req_rx, resp_tx));
 
-    // Poll for the finished index and switch search on when it arrives.
-    let index_timer = Timer::default();
+    // Drain the worker's responses and apply them to the UI. Polls often enough
+    // that results land within a frame or two of the worker finishing.
+    let resp_timer = Timer::default();
     {
         let ui_weak = ui.as_weak();
         let manager = manager.clone();
-        let engine = engine.clone();
         let results_model = results_model.clone();
         let blocks_model = blocks_model.clone();
         let history = history.clone();
         let rows = rows.clone();
-        index_timer.start(
-            TimerMode::Repeated,
-            Duration::from_millis(120),
-            move || match rx.try_recv() {
-                Ok(Ok(e)) => {
-                    let ui = ui_weak.unwrap();
-                    *engine.borrow_mut() = Some(e);
-                    ui.set_index_ready(true);
-                    let q = ui.get_query();
-                    if !q.trim().is_empty() {
-                        run_search(
+        let req_tx = req_tx.clone();
+        let gen = gen.clone();
+        resp_timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
+            while let Ok(msg) = resp_rx.try_recv() {
+                let ui = ui_weak.unwrap();
+                match msg {
+                    WorkerMsg::Results { gen: g, results } => {
+                        if g == gen.get() {
+                            apply_results(
+                                &ui,
+                                &results_model,
+                                &rows,
+                                &blocks_model,
+                                &history,
+                                *results,
+                            );
+                        }
+                    }
+                    WorkerMsg::NoEngine { gen: g } => {
+                        if g == gen.get() {
+                            apply_page(
+                                &ui,
+                                &blocks_model,
+                                &message_page(
+                                    "",
+                                    "Preparing dictionary…",
+                                    "Building the search index — one moment.",
+                                ),
+                            );
+                        }
+                    }
+                    WorkerMsg::IndexReady => {
+                        ui.set_index_ready(true);
+                        // Run whatever the user has already typed against the new index.
+                        let q = ui.get_query();
+                        if !q.trim().is_empty() {
+                            gen.set(gen.get() + 1);
+                            let scope = scope_filter(ui.get_scope(), &manager);
+                            let _ = req_tx.send(WorkerReq::Search {
+                                gen: gen.get(),
+                                query: q.to_string(),
+                                scope,
+                            });
+                        }
+                    }
+                    WorkerMsg::BuildError(msg) => {
+                        apply_page(
                             &ui,
-                            &manager,
-                            &engine,
-                            &results_model,
                             &blocks_model,
-                            &history,
-                            &rows,
-                            &q,
+                            &message_page("", "Couldn't build index", &msg),
                         );
                     }
                 }
-                Ok(Err(msg)) => {
-                    let ui = ui_weak.unwrap();
-                    show_message(&ui, &blocks_model, "Couldn't build index", &msg);
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => {}
-            },
-        );
+            }
+        });
     }
 
     // Live search as the user types.
     {
         let ui_weak = ui.as_weak();
         let manager = manager.clone();
-        let engine = engine.clone();
         let results_model = results_model.clone();
         let blocks_model = blocks_model.clone();
         let history = history.clone();
         let rows = rows.clone();
-        // Debounce: keep typing responsive by deferring the (render-heavy) search
-        // until the user pauses, instead of running it on every keystroke.
+        let req_tx = req_tx.clone();
+        let gen = gen.clone();
+        // Debounce: defer the search until the user pauses, instead of dispatching
+        // one on every keystroke. The search itself runs on the worker thread.
         let debounce = Rc::new(Timer::default());
         ui.on_query_changed(move |q| {
             if q.trim().is_empty() {
                 let ui = ui_weak.unwrap();
                 debounce.stop();
+                // Bump the generation so any in-flight search response is dropped.
+                gen.set(gen.get() + 1);
                 ui.set_searching(false);
                 results_model.set_vec(Vec::new());
                 rows.borrow_mut().clear();
@@ -336,26 +497,20 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             let ui_weak = ui_weak.clone();
             let manager = manager.clone();
-            let engine = engine.clone();
-            let results_model = results_model.clone();
-            let blocks_model = blocks_model.clone();
-            let history = history.clone();
-            let rows = rows.clone();
+            let req_tx = req_tx.clone();
+            let gen = gen.clone();
             debounce.start(
                 TimerMode::SingleShot,
                 Duration::from_millis(110),
                 move || {
                     let ui = ui_weak.unwrap();
-                    run_search(
-                        &ui,
-                        &manager,
-                        &engine,
-                        &results_model,
-                        &blocks_model,
-                        &history,
-                        &rows,
-                        &ui.get_query(),
-                    );
+                    gen.set(gen.get() + 1);
+                    let scope = scope_filter(ui.get_scope(), &manager);
+                    let _ = req_tx.send(WorkerReq::Search {
+                        gen: gen.get(),
+                        query: ui.get_query().to_string(),
+                        scope,
+                    });
                 },
             );
         });
@@ -368,6 +523,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let blocks_model = blocks_model.clone();
         let history = history.clone();
         let rows = rows.clone();
+        let gen = gen.clone();
         ui.on_select(move |row| {
             let ui = ui_weak.unwrap();
             let headword = rows
@@ -375,6 +531,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 .get(row.max(0) as usize)
                 .map(|r| r.headword.clone());
             if let Some(headword) = headword {
+                // Supersede any in-flight search so its result can't clobber this.
+                gen.set(gen.get() + 1);
                 let filter = scope_filter(ui.get_scope(), &manager);
                 ui.set_selected_index(row);
                 navigate(
@@ -396,8 +554,11 @@ fn main() -> Result<(), slint::PlatformError> {
         let manager = manager.clone();
         let blocks_model = blocks_model.clone();
         let history = history.clone();
+        let gen = gen.clone();
         ui.on_lookup_token(move |link| {
             let ui = ui_weak.unwrap();
+            // Supersede any in-flight search so its result can't clobber this.
+            gen.set(gen.get() + 1);
             let filter = scope_filter(ui.get_scope(), &manager);
             // The clicked link is a `lookup://<word>` URL; strip the scheme.
             let word = link.as_str().strip_prefix("lookup://").unwrap_or(link.as_str());
@@ -418,11 +579,10 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = ui.as_weak();
         let manager = manager.clone();
-        let engine = engine.clone();
-        let results_model = results_model.clone();
         let blocks_model = blocks_model.clone();
         let history = history.clone();
-        let rows = rows.clone();
+        let req_tx = req_tx.clone();
+        let gen = gen.clone();
         ui.on_scope_changed(move |idx| {
             let ui = ui_weak.unwrap();
             // Ignore out-of-range scopes (e.g. Ctrl+5 with only two dictionaries).
@@ -434,6 +594,8 @@ fn main() -> Result<(), slint::PlatformError> {
             let name = scope_filter(idx, &manager);
             manager.borrow_mut().preferences_mut().last_scope = name;
             save_config(&manager);
+            // A scope change supersedes any in-flight search either way.
+            gen.set(gen.get() + 1);
             let q = ui.get_query();
             if q.trim().is_empty() {
                 // The word of the moment follows the newly-selected dictionary.
@@ -448,16 +610,13 @@ fn main() -> Result<(), slint::PlatformError> {
                     wotm_src.as_deref(),
                 );
             } else {
-                run_search(
-                    &ui,
-                    &manager,
-                    &engine,
-                    &results_model,
-                    &blocks_model,
-                    &history,
-                    &rows,
-                    &q,
-                );
+                // Re-run the current query under the new scope on the worker.
+                let scope = scope_filter(idx, &manager);
+                let _ = req_tx.send(WorkerReq::Search {
+                    gen: gen.get(),
+                    query: q.to_string(),
+                    scope,
+                });
             }
         });
     }
@@ -470,6 +629,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let manager = manager.clone();
         let blocks_model = blocks_model.clone();
         let history = history.clone();
+        let gen = gen.clone();
         ui.on_navigate_back(move || {
             let ui = ui_weak.unwrap();
             let entry = {
@@ -481,6 +641,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 h.current().cloned()
             };
             if let Some(e) = entry {
+                // Supersede any in-flight search so its result can't clobber this.
+                gen.set(gen.get() + 1);
                 replay(&ui, &manager, &blocks_model, &e);
             }
             sync_nav_state(&ui, &history);
@@ -491,6 +653,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let manager = manager.clone();
         let blocks_model = blocks_model.clone();
         let history = history.clone();
+        let gen = gen.clone();
         ui.on_navigate_forward(move || {
             let ui = ui_weak.unwrap();
             let entry = {
@@ -502,6 +665,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 h.current().cloned()
             };
             if let Some(e) = entry {
+                // Supersede any in-flight search so its result can't clobber this.
+                gen.set(gen.get() + 1);
                 replay(&ui, &manager, &blocks_model, &e);
             }
             sync_nav_state(&ui, &history);
@@ -524,7 +689,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let manager = manager.clone();
         let dict_items = dict_items.clone();
         let scopes = scopes.clone();
-        let tx = tx.clone();
+        let req_tx = req_tx.clone();
         ui.on_toggle_dict(move |row| {
             let ui = ui_weak.unwrap();
             let name = nth_dict_name(&manager, row);
@@ -533,7 +698,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 manager.borrow_mut().set_enabled(&name, now);
                 save_config(&manager);
                 refresh_lists(&ui, &manager, &dict_items, &scopes);
-                request_rebuild(&ui, &tx);
+                request_rebuild(&ui, &req_tx);
             }
         });
     }
@@ -544,6 +709,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let manager = manager.clone();
         let dict_items = dict_items.clone();
         let scopes = scopes.clone();
+        let req_tx = req_tx.clone();
         ui.on_set_dict_language(move |row, lang| {
             let ui = ui_weak.unwrap();
             if let Some(name) = nth_dict_name(&manager, row) {
@@ -552,6 +718,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     .set_language(&name, index_to_lang(lang));
                 save_config(&manager);
                 refresh_lists(&ui, &manager, &dict_items, &scopes);
+                // No reindex, but the worker's manager must pick up the new
+                // language pin (it drives conjugation).
+                let _ = req_tx.send(WorkerReq::Reload { rebuild: false });
             }
         });
     }
@@ -562,14 +731,14 @@ fn main() -> Result<(), slint::PlatformError> {
         let manager = manager.clone();
         let dict_items = dict_items.clone();
         let scopes = scopes.clone();
-        let tx = tx.clone();
+        let req_tx = req_tx.clone();
         ui.on_remove_dict(move |row| {
             let ui = ui_weak.unwrap();
             if let Some(name) = nth_dict_name(&manager, row) {
                 manager.borrow_mut().remove(&name);
                 save_config(&manager);
                 refresh_lists(&ui, &manager, &dict_items, &scopes);
-                request_rebuild(&ui, &tx);
+                request_rebuild(&ui, &req_tx);
             }
         });
     }
@@ -598,7 +767,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let manager = manager.clone();
         let dict_items = dict_items.clone();
         let scopes = scopes.clone();
-        let tx = tx.clone();
+        let req_tx = req_tx.clone();
         add_timer.start(TimerMode::Repeated, Duration::from_millis(150), move || {
             let Ok(path) = path_rx.try_recv() else {
                 return;
@@ -609,7 +778,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 Ok(()) => {
                     save_config(&manager);
                     refresh_lists(&ui, &manager, &dict_items, &scopes);
-                    request_rebuild(&ui, &tx);
+                    request_rebuild(&ui, &req_tx);
                 }
                 Err(e) => eprintln!("failed to add {}: {}", path.display(), e),
             }
@@ -648,19 +817,19 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     let r = ui.run();
-    drop(index_timer);
+    // Stop the timers and ask the worker to exit so the process winds down cleanly.
+    drop(resp_timer);
     drop(add_timer);
+    let _ = req_tx.send(WorkerReq::Shutdown);
     r
 }
 
-/// Trigger a background index rebuild, delivered over the engine channel and
-/// hot-swapped in by `index_timer`. The old index keeps serving until it lands.
-fn request_rebuild(ui: &AppWindow, tx: &Rc<mpsc::Sender<Result<SearchEngine, String>>>) {
+/// Ask the worker to rebuild the index (the dictionary set changed). The worker
+/// keeps serving the old index until the new one is ready; `index_ready` flips
+/// back on via the `IndexReady` message.
+fn request_rebuild(ui: &AppWindow, req_tx: &Rc<mpsc::Sender<WorkerReq>>) {
     ui.set_index_ready(false);
-    let tx = mpsc::Sender::clone(tx);
-    std::thread::spawn(move || {
-        let _ = tx.send(rebuild_index());
-    });
+    let _ = req_tx.send(WorkerReq::Reload { rebuild: true });
 }
 
 /// Persist the manager's dictionaries + preferences to the config file.
@@ -867,58 +1036,219 @@ fn pretty_dict_name(name: &str) -> String {
     }
 }
 
-/// Show a plain text message (no entry) in the definition pane.
-fn show_message(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, title: &str, body: &str) {
-    ui.set_section_label("".into());
-    ui.set_def_headword(title.into());
-    ui.set_def_pron("".into());
-    ui.set_def_pos("".into());
-    ui.set_def_etym("".into());
-    blocks_model.set_vec(vec![DefBlock {
-        marker: "".into(),
-        text: body.into(),
-        styled: Default::default(),
-    }]);
-    ui.set_def_source("".into());
-    clear_conjugation(ui);
+/// A plain-message page (no entry): a "Preparing…" / "No results" / error notice.
+fn message_page(section_label: &str, title: &str, body: &str) -> RenderedPage {
+    RenderedPage {
+        section_label: section_label.to_string(),
+        headword: title.to_string(),
+        source: String::new(),
+        body: PageBody::Message {
+            body: body.to_string(),
+        },
+    }
 }
 
-/// Run a query through the engine and update the list + definition pane.
-#[allow(clippy::too_many_arguments)]
-fn run_search(
-    ui: &AppWindow,
-    manager: &Rc<RefCell<DictionaryManager>>,
-    engine: &Rc<RefCell<Option<SearchEngine>>>,
-    results_model: &Rc<VecModel<ResultItem>>,
-    blocks_model: &Rc<VecModel<DefBlock>>,
-    history: &Rc<RefCell<NavHistory>>,
-    rows: &Rc<RefCell<Vec<RowData>>>,
-    query: &str,
-) {
-    let needle = query.trim();
-    let filter = scope_filter(ui.get_scope(), manager);
-    let eng_ref = engine.borrow();
-    let Some(eng) = eng_ref.as_ref() else {
-        show_message(
-            ui,
-            blocks_model,
-            "Preparing dictionary…",
-            "Building the search index — one moment.",
-        );
-        return;
+/// Resolve `headword` to its full definition and parse it into render-ready data.
+/// This is the heavy half (disk read, HTML stripping, markdown conversion,
+/// conjugation) and is `Send`-free of Slint types, so it can run on the worker
+/// thread; `apply_page` turns the result into UI models.
+fn compute_page(
+    manager: &mut DictionaryManager,
+    headword: &str,
+    label: &str,
+    filter: Option<&str>,
+) -> RenderedPage {
+    let (raw, source, html) = lookup_raw(manager, headword, filter);
+    if raw.is_empty() {
+        return message_page(label, headword, "No definition found.");
+    }
+
+    // Build the plain-text body blocks (marker + text), plus the header fields.
+    let (pron, pos, etym, plain): (String, String, String, Vec<(String, String)>) = if html {
+        // HTML entry: the first paragraph repeats the headword with its phonetic
+        // and part of speech. Lift those onto the grey pron/pos line (as GCIDE
+        // does) and drop the duplicate, then convert the rest to plain-text
+        // paragraphs so tags don't show and the body can be virtualized.
+        let mut paras = html_to_blocks(&raw);
+        let (pron, pos, etym) = extract_html_header(&mut paras, headword);
+        let blocks = paras
+            .into_iter()
+            .map(|t| split_sense_marker(&t))
+            .collect();
+        (pron, pos, etym, blocks)
+    } else {
+        let parsed = parse_entry(&raw);
+        let blocks = if parsed.senses.is_empty() {
+            // Fall back to lightly-cleaned text when we couldn't split senses.
+            vec![(String::new(), cleaned_plain(&raw))]
+        } else {
+            parsed
+                .senses
+                .into_iter()
+                .enumerate()
+                .map(|(i, s)| (format!("{}.", i + 1), s))
+                .collect()
+        };
+        (parsed.pronunciation, parsed.pos, String::new(), blocks)
     };
+
+    // Convert each block's text to markdown with clickable cross-reference links.
+    // GCIDE `{word}` braces become `[word](lookup://word)` links; HTML entries
+    // have already been stripped to plain text.
+    let blocks: Vec<RenderedBlock> = plain
+        .into_iter()
+        .map(|(marker, text)| {
+            let md = if html {
+                convert_html_refs_to_links(&text)
+            } else {
+                convert_gcide_refs_to_links(&text)
+            };
+            RenderedBlock { marker, text, md }
+        })
+        .collect();
+
+    let conjugation = compute_conjugation(manager, headword, &raw, &source);
+
+    RenderedPage {
+        section_label: label.to_string(),
+        headword: headword.to_string(),
+        source,
+        body: PageBody::Entry {
+            pron,
+            pos,
+            etym,
+            blocks,
+            conjugation,
+        },
+    }
+}
+
+/// Compute `headword`'s conjugation from its definition and the source
+/// dictionary's pinned language. Empty when the word isn't a recognized verb.
+fn compute_conjugation(
+    manager: &DictionaryManager,
+    headword: &str,
+    raw: &str,
+    source: &str,
+) -> Vec<RenderedConjSection> {
+    let language = manager
+        .dictionaries()
+        .iter()
+        .find(|d| d.name() == source)
+        .map(|d| d.language)
+        .unwrap_or(Language::Auto);
+
+    let def = (!raw.is_empty()).then_some(raw);
+    let Some(conj) = ConjugatorRegistry::new().conjugate(headword, def, language) else {
+        return Vec::new();
+    };
+    conj.sections
+        .iter()
+        .map(|s| RenderedConjSection {
+            label: s.label.clone(),
+            forms: s
+                .forms
+                .iter()
+                .map(|f| RenderedConjForm {
+                    label: f.label.clone(),
+                    text: f.text.clone(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Push a computed page into the UI. This is the light half (it builds the Slint
+/// models and parses the markdown into styled text) and must run on the UI thread.
+fn apply_page(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, page: &RenderedPage) {
+    ui.set_section_label(page.section_label.as_str().into());
+    ui.set_def_headword(page.headword.as_str().into());
+    ui.set_def_source(page.source.as_str().into());
+    match &page.body {
+        PageBody::Message { body } => {
+            ui.set_def_pron("".into());
+            ui.set_def_pos("".into());
+            ui.set_def_etym("".into());
+            blocks_model.set_vec(vec![DefBlock {
+                marker: "".into(),
+                text: body.as_str().into(),
+                styled: Default::default(),
+            }]);
+            clear_conjugation(ui);
+        }
+        PageBody::Entry {
+            pron,
+            pos,
+            etym,
+            blocks,
+            conjugation,
+        } => {
+            ui.set_def_pron(pron.as_str().into());
+            ui.set_def_pos(pos.as_str().into());
+            ui.set_def_etym(etym.as_str().into());
+            let blocks: Vec<DefBlock> = blocks
+                .iter()
+                .map(|b| DefBlock {
+                    marker: b.marker.as_str().into(),
+                    text: b.text.as_str().into(),
+                    styled: parse_markdown::<StyledText>(&b.md, &[]),
+                })
+                .collect();
+            blocks_model.set_vec(blocks);
+            apply_conjugation(ui, conjugation);
+        }
+    }
+}
+
+/// Build the conjugation models from computed sections (UI thread).
+fn apply_conjugation(ui: &AppWindow, sections: &[RenderedConjSection]) {
+    if sections.is_empty() {
+        clear_conjugation(ui);
+        return;
+    }
+    let sections: Vec<ConjSection> = sections
+        .iter()
+        .map(|s| {
+            let forms: Vec<ConjForm> = s
+                .forms
+                .iter()
+                .map(|f| ConjForm {
+                    label: f.label.as_str().into(),
+                    text: f.text.as_str().into(),
+                })
+                .collect();
+            ConjSection {
+                label: s.label.as_str().into(),
+                forms: ModelRc::from(Rc::new(VecModel::from(forms))),
+            }
+        })
+        .collect();
+    // The table starts hidden; the page only shows a button to open it.
+    ui.set_conjugation(ModelRc::from(Rc::new(VecModel::from(sections))));
+    ui.set_show_conjugation(false);
+}
+
+/// Run a query through the engine and render its first result. Runs on the worker
+/// thread; the UI applies the outcome via `apply_results`.
+fn compute_search(
+    engine: &SearchEngine,
+    manager: &mut DictionaryManager,
+    query: &str,
+    filter: Option<&str>,
+) -> RenderedResults {
+    let needle = query.trim();
 
     // Prefix (autocomplete) first; fall back to fuzzy for typos. Both are scoped
     // to the selected dictionary (or all, when no scope is active). Exact-match
     // headwords are always placed first, even if the prefix query doesn't return
     // them (tantivy's RegexQuery DFA misses terms exactly matching the literal).
-    let mut hits = eng
-        .search_scoped(needle, SearchMode::Prefix, 80, filter.as_deref())
+    let mut hits = engine
+        .search_scoped(needle, SearchMode::Prefix, 80, filter)
         .unwrap_or_default();
     if hits.is_empty() {
         // Fuzzy hits are already ranked by edit distance — keep that order.
-        hits = eng
-            .search_scoped(needle, SearchMode::Fuzzy, 40, filter.as_deref())
+        hits = engine
+            .search_scoped(needle, SearchMode::Fuzzy, 40, filter)
             .unwrap_or_default();
     } else {
         // Prefix hits are unranked; show the shortest (closest) completion first.
@@ -932,7 +1262,7 @@ fn run_search(
     }
     // Always look up the exact match and place it first, even if the prefix
     // query missed it (tantivy bug: `go.*` regex doesn't match term "go").
-    if let Ok(exact_hits) = eng.search_scoped(needle, SearchMode::Exact, 1, filter.as_deref()) {
+    if let Ok(exact_hits) = engine.search_scoped(needle, SearchMode::Exact, 1, filter) {
         if let Some(exact) = exact_hits.into_iter().next() {
             // Remove any duplicate from prefix results.
             hits.retain(|h| h.headword.to_lowercase() != needle.to_lowercase());
@@ -941,47 +1271,82 @@ fn run_search(
     }
     hits.truncate(40);
 
-    let mut items = Vec::with_capacity(hits.len());
-    let mut rd = Vec::with_capacity(hits.len());
-    for h in &hits {
-        items.push(ResultItem {
-            headword: h.headword.clone().into(),
-            snippet: make_snippet(&h.snippet).into(),
-            source: h.dictionary.clone().into(),
-        });
-        rd.push(RowData {
+    let items: Vec<RenderedItem> = hits
+        .iter()
+        .map(|h| RenderedItem {
             headword: h.headword.clone(),
-        });
-    }
-    results_model.set_vec(items);
-    *rows.borrow_mut() = rd;
-    ui.set_searching(true);
+            snippet: make_snippet(&h.snippet),
+            source: h.dictionary.clone(),
+        })
+        .collect();
 
     if let Some(first) = hits.first() {
-        ui.set_selected_index(0);
-        navigate(
-            ui,
-            manager,
-            blocks_model,
-            history,
-            &first.headword,
-            "",
-            filter.as_deref(),
-        );
+        let page = compute_page(manager, &first.headword, "", filter);
+        RenderedResults {
+            items,
+            first_headword: Some(first.headword.clone()),
+            page,
+        }
     } else {
-        ui.set_selected_index(-1);
-        show_message(
-            ui,
-            blocks_model,
+        let page = message_page(
+            "",
             "No results",
             &format!("Nothing matches \u{201c}{needle}\u{201d}."),
         );
+        RenderedResults {
+            items,
+            first_headword: None,
+            page,
+        }
     }
 }
 
-/// Show a page and record it in the navigation history, so it can be revisited
-/// with back/forward. Use this for every user-initiated navigation; the
-/// back/forward handlers call `show_word` directly so they don't re-push.
+/// Apply a worker search outcome to the UI: fill the result list, show the first
+/// page, and record the first hit in history (so back/forward work).
+fn apply_results(
+    ui: &AppWindow,
+    results_model: &Rc<VecModel<ResultItem>>,
+    rows: &Rc<RefCell<Vec<RowData>>>,
+    blocks_model: &Rc<VecModel<DefBlock>>,
+    history: &Rc<RefCell<NavHistory>>,
+    results: RenderedResults,
+) {
+    let items: Vec<ResultItem> = results
+        .items
+        .iter()
+        .map(|i| ResultItem {
+            headword: i.headword.as_str().into(),
+            snippet: i.snippet.as_str().into(),
+            source: i.source.as_str().into(),
+        })
+        .collect();
+    *rows.borrow_mut() = results
+        .items
+        .iter()
+        .map(|i| RowData {
+            headword: i.headword.clone(),
+        })
+        .collect();
+    results_model.set_vec(items);
+    ui.set_searching(true);
+
+    apply_page(ui, blocks_model, &results.page);
+    if let Some(headword) = results.first_headword {
+        ui.set_selected_index(0);
+        history.borrow_mut().push(NavEntry {
+            headword,
+            label: String::new(),
+            scope: ui.get_scope(),
+        });
+        sync_nav_state(ui, history);
+    } else {
+        ui.set_selected_index(-1);
+    }
+}
+
+/// Render `headword` (on the UI thread, via the UI's own manager) and record it
+/// in the navigation history, so it can be revisited with back/forward. Used for
+/// synchronous user actions (clicks, links, word of the moment).
 fn navigate(
     ui: &AppWindow,
     manager: &Rc<RefCell<DictionaryManager>>,
@@ -991,7 +1356,8 @@ fn navigate(
     label: &str,
     filter: Option<&str>,
 ) {
-    show_word(ui, manager, blocks_model, headword, label, filter);
+    let page = compute_page(&mut manager.borrow_mut(), headword, label, filter);
+    apply_page(ui, blocks_model, &page);
     history.borrow_mut().push(NavEntry {
         headword: headword.to_string(),
         label: label.to_string(),
@@ -1010,14 +1376,13 @@ fn replay(
 ) {
     ui.set_scope(entry.scope);
     let filter = scope_filter(entry.scope, manager);
-    show_word(
-        ui,
-        manager,
-        blocks_model,
+    let page = compute_page(
+        &mut manager.borrow_mut(),
         &entry.headword,
         &entry.label,
         filter.as_deref(),
     );
+    apply_page(ui, blocks_model, &page);
 }
 
 /// Mirror whether back/forward are possible onto the UI (drives the toolbar
@@ -1026,143 +1391,6 @@ fn sync_nav_state(ui: &AppWindow, history: &Rc<RefCell<NavHistory>>) {
     let h = history.borrow();
     ui.set_can_go_back(h.can_back());
     ui.set_can_go_forward(h.can_forward());
-}
-
-/// Resolve `headword` to its full definition, parse it, and show it.
-fn show_word(
-    ui: &AppWindow,
-    manager: &Rc<RefCell<DictionaryManager>>,
-    blocks_model: &Rc<VecModel<DefBlock>>,
-    headword: &str,
-    label: &str,
-    filter: Option<&str>,
-) {
-    let (raw, source, html) = lookup_raw(manager, headword, filter);
-    if raw.is_empty() {
-        show_message(ui, blocks_model, headword, "No definition found.");
-        ui.set_section_label(label.into());
-        return;
-    }
-
-    ui.set_section_label(label.into());
-    ui.set_def_headword(headword.into());
-    ui.set_def_source(source.clone().into());
-
-    let blocks: Vec<DefBlock> = if html {
-        // HTML entry: the first paragraph repeats the headword with its phonetic
-        // and part of speech. Lift those onto the grey pron/pos line (as GCIDE
-        // does) and drop the duplicate, then convert the rest to plain-text
-        // paragraphs so tags don't show and the body can be virtualized.
-        let mut paras = html_to_blocks(&raw);
-        let (pron, pos, etym) = extract_html_header(&mut paras, headword);
-        ui.set_def_pron(pron.into());
-        ui.set_def_pos(pos.into());
-        ui.set_def_etym(etym.into());
-        paras
-            .into_iter()
-            .map(|t| {
-                let (marker, text) = split_sense_marker(&t);
-                DefBlock {
-                    marker: marker.into(),
-                    text: text.into(),
-                    styled: Default::default(),
-                }
-            })
-            .collect()
-    } else {
-        let parsed = parse_entry(&raw);
-        ui.set_def_pron(parsed.pronunciation.into());
-        ui.set_def_pos(parsed.pos.into());
-        ui.set_def_etym("".into());
-        if parsed.senses.is_empty() {
-            // Fall back to lightly-cleaned text when we couldn't split senses.
-            vec![DefBlock {
-                marker: "".into(),
-                text: cleaned_plain(&raw).into(),
-                styled: Default::default(),
-            }]
-        } else {
-            parsed
-                .senses
-                .into_iter()
-                .enumerate()
-                .map(|(i, s)| DefBlock {
-                    marker: format!("{}.", i + 1).into(),
-                    text: s.into(),
-                    styled: Default::default(),
-                })
-                .collect()
-        }
-    };
-    // Convert each block's text to markdown with clickable cross-reference
-    // links. GCIDE `{word}` braces become `[word](lookup://word)` links.
-    // HTML styled spans are handled similarly.
-    let blocks: Vec<DefBlock> = blocks
-        .into_iter()
-        .map(|b| {
-            let md = if html {
-                convert_html_refs_to_links(&b.text)
-            } else {
-                convert_gcide_refs_to_links(&b.text)
-            };
-            DefBlock {
-                marker: b.marker.clone(),
-                text: b.text.clone(),
-                styled: parse_markdown::<StyledText>(&md, &[]),
-            }
-        })
-        .collect();
-    blocks_model.set_vec(blocks);
-    set_conjugation(ui, manager, headword, &raw, &source);
-}
-
-/// Compute `headword`'s conjugation from its definition (and the source
-/// dictionary's pinned language) and push it to the UI. Clears the block when the
-/// word isn't a recognized verb.
-fn set_conjugation(
-    ui: &AppWindow,
-    manager: &Rc<RefCell<DictionaryManager>>,
-    headword: &str,
-    raw: &str,
-    source: &str,
-) {
-    let language = {
-        let m = manager.borrow();
-        m.dictionaries()
-            .iter()
-            .find(|d| d.name() == source)
-            .map(|d| d.language)
-            .unwrap_or(Language::Auto)
-    };
-
-    let def = (!raw.is_empty()).then_some(raw);
-    let Some(conj) = ConjugatorRegistry::new().conjugate(headword, def, language) else {
-        clear_conjugation(ui);
-        return;
-    };
-
-    let sections: Vec<ConjSection> = conj
-        .sections
-        .iter()
-        .map(|s| {
-            let forms: Vec<ConjForm> = s
-                .forms
-                .iter()
-                .map(|f| ConjForm {
-                    label: f.label.clone().into(),
-                    text: f.text.clone().into(),
-                })
-                .collect();
-            ConjSection {
-                label: s.label.clone().into(),
-                forms: ModelRc::from(Rc::new(VecModel::from(forms))),
-            }
-        })
-        .collect();
-
-    // The table starts hidden; the page only shows a button to open it.
-    ui.set_conjugation(ModelRc::from(Rc::new(VecModel::from(sections))));
-    ui.set_show_conjugation(false);
 }
 
 fn clear_conjugation(ui: &AppWindow) {
@@ -1176,12 +1404,11 @@ fn clear_conjugation(ui: &AppWindow) {
 /// whether the entry is HTML). When `filter` is set, only that dictionary's
 /// results are considered.
 fn lookup_raw(
-    manager: &Rc<RefCell<DictionaryManager>>,
+    manager: &mut DictionaryManager,
     headword: &str,
     filter: Option<&str>,
 ) -> (String, String, bool) {
-    let mut m = manager.borrow_mut();
-    match m.lookup(headword) {
+    match manager.lookup(headword) {
         Ok(results) if !results.is_empty() => {
             let results: Vec<_> = results
                 .into_iter()
