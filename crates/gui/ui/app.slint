@@ -292,20 +292,44 @@ export component AppWindow inherits Window {
                 width: 260px;
                 border-radius: 8px;
                 background: control-bg;
+                // Subtle at rest, accent ring on focus (colour only, so the inner
+                // content doesn't shift when focus changes).
                 border-width: 1px;
                 border-color: search-input.has-focus ? accent : divider;
                 HorizontalLayout {
                     padding-left: 10px;
-                    padding-right: 10px;
-                    spacing: 6px;
+                    padding-right: 8px;
+                    spacing: 7px;
+                    // Leading search glyph, tinted to the accent while focused.
                     Text {
+                        width: 16px;
                         text: "⌕";
+                        horizontal-alignment: center;
                         vertical-alignment: center;
                         font-size: 17px;
-                        color: text-secondary;
+                        color: search-input.has-focus ? accent : text-secondary;
                     }
+                    // Text area: stretches to fill, with the input and placeholder
+                    // both pinned left so the caret starts here (not centered).
                     Rectangle {
+                        horizontal-stretch: 1;
+                        clip: true;
+                        // Placeholder sits underneath, left-aligned to match the
+                        // input; hidden as soon as the user types.
+                        Text {
+                            x: 0;
+                            width: parent.width;
+                            visible: root.query == "";
+                            text: root.index-ready ? "Search…" : "Indexing…";
+                            horizontal-alignment: left;
+                            vertical-alignment: center;
+                            font-size: 14px;
+                            color: text-secondary;
+                        }
                         search-input := TextInput {
+                            x: 0;
+                            width: parent.width;
+                            horizontal-alignment: left;
                             vertical-alignment: center;
                             font-size: 14px;
                             color: text-primary;
@@ -321,12 +345,26 @@ export component AppWindow inherits Window {
                                     : EventResult.reject;
                             }
                         }
+                    }
+                    // Clear button, shown only while there's a query.
+                    Rectangle {
+                        width: 18px;
+                        visible: root.query != "";
+                        border-radius: 9px;
+                        background: clear-touch.has-hover ? divider : transparent;
+                        clear-touch := TouchArea {
+                            clicked => {
+                                root.query = "";
+                                root.query-changed("");
+                                search-input.focus();
+                            }
+                        }
                         Text {
-                            visible: root.query == "";
-                            text: root.index-ready ? "Search…" : "Indexing…";
+                            text: "✕";
+                            horizontal-alignment: center;
                             vertical-alignment: center;
-                            font-size: 14px;
-                            color: text-secondary;
+                            font-size: 11px;
+                            color: clear-touch.has-hover ? text-primary : text-secondary;
                         }
                     }
                 }
