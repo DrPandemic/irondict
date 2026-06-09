@@ -1,1 +1,5 @@
 /target
+packaging/aur/pkg/
+packaging/aur/src/
+packaging/aur/*.pkg.tar.zst
+packaging/aur/*.tar.gz

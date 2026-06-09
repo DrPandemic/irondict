@@ -2,7 +2,7 @@
 
 <img src="docs/assets/icon.svg" width="96" alt="irondict icon">
 
-# irondict
+# IronDict
 
 **Fast local multi-dictionary lookup with fuzzy and full-text search — CLI and GUI.**
 
