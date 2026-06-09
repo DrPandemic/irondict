@@ -375,10 +375,17 @@ so both share the same backend).
     Backspace when the search box isn't focused) **and** ‹ / › buttons in the
     toolbar (greyed out at the ends). Restores the entry and its scope; the body
     scroll resets to the top on each new entry (`changed def-blocks`).
-  - [ ] **Italic examples / quotations.** Petit Robert italicises examples; GCIDE
-    currently *drops* its quotations — show them instead in a lighter italic style.
-    Per-block styling (a block carries a style kind), since Slint can't mix font
-    runs inside a single `Text`.
+  - [x] **Italic examples / quotations.** Petit Robert italicises examples; GCIDE
+    used to *drop* its quotations — now they're kept and shown in a lighter italic
+    style. Per-block styling (a block carries a `quote` flag), since Slint can't mix
+    font runs inside a single `Text`. **Implemented:** `parse_senses`/`unnumbered_sense`
+    return a `Sense { body, quotes }` (the shared `split_body_quotes` partitions a
+    sense's lines into body prose vs. indented quotation blocks, grouped by blank
+    lines); `compute_page` expands each sense into its numbered body block followed by
+    markerless `quote: true` blocks; `RenderedBlock`/the Slint `DefBlock` carry the
+    `quote` flag, and the body `ListView` renders quotes as a plain italic
+    `text-secondary` `Text` (indented under the sense) instead of the markdown
+    `StyledText` used for prose (so quotes aren't clickable — they're illustrative).
   - [ ] **Synonym styling.** Render the cross-reference / synonym runs in the accent
     (or secondary) colour so they read as distinct from the definition prose; ties
     in with the clickable-cross-reference span model above.

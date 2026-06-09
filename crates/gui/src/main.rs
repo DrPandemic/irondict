@@ -66,6 +66,8 @@ struct RenderedBlock {
     marker: String,
     text: String,
     md: String,
+    /// True for an indented example/quotation block (rendered italic + greyed).
+    quote: bool,
 }
 
 struct RenderedConjForm {
@@ -1063,8 +1065,10 @@ fn compute_page(
         return message_page(label, headword, "No definition found.");
     }
 
-    // Build the plain-text body blocks (marker + text), plus the header fields.
-    let (pron, pos, etym, plain): (String, String, String, Vec<(String, String)>) = if html {
+    // Build the plain-text body blocks (marker + text + quote flag), plus the
+    // header fields. A quote block is an indented GCIDE example/quotation, shown
+    // in lighter italic under the sense it belongs to.
+    let (pron, pos, etym, plain): (String, String, String, Vec<(String, String, bool)>) = if html {
         // HTML entry: the first paragraph repeats the headword with its phonetic
         // and part of speech. Lift those onto the grey pron/pos line (as GCIDE
         // does) and drop the duplicate, then convert the rest to plain-text
@@ -1073,7 +1077,10 @@ fn compute_page(
         let (pron, pos, etym) = extract_html_header(&mut paras, headword);
         let blocks = paras
             .into_iter()
-            .map(|t| split_sense_marker(&t))
+            .map(|t| {
+                let (marker, body) = split_sense_marker(&t);
+                (marker, body, false)
+            })
             .collect();
         // The header fields are shown as plain text, so drop any link sentinels.
         (
@@ -1086,13 +1093,18 @@ fn compute_page(
         let parsed = parse_entry(&raw);
         let blocks = if parsed.senses.is_empty() {
             // Fall back to lightly-cleaned text when we couldn't split senses.
-            vec![(String::new(), cleaned_plain(&raw))]
+            vec![(String::new(), cleaned_plain(&raw), false)]
         } else {
             parsed
                 .senses
                 .into_iter()
                 .enumerate()
-                .map(|(i, s)| (format!("{}.", i + 1), s))
+                .flat_map(|(i, s)| {
+                    // The sense body carries the number; its quotations follow as
+                    // markerless italic blocks.
+                    std::iter::once((format!("{}.", i + 1), s.body, false))
+                        .chain(s.quotes.into_iter().map(|q| (String::new(), q, true)))
+                })
                 .collect()
         };
         (parsed.pronunciation, parsed.pos, String::new(), blocks)
@@ -1104,13 +1116,18 @@ fn compute_page(
     // `text` keeps the link label but not the markup.
     let blocks: Vec<RenderedBlock> = plain
         .into_iter()
-        .map(|(marker, text)| {
+        .map(|(marker, text, quote)| {
             let (md, text) = if html {
                 (convert_html_refs_to_links(&text), strip_link_markers(&text))
             } else {
                 (convert_gcide_refs_to_links(&text), text)
             };
-            RenderedBlock { marker, text, md }
+            RenderedBlock {
+                marker,
+                text,
+                md,
+                quote,
+            }
         })
         .collect();
 
@@ -1180,6 +1197,7 @@ fn apply_page(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, page: &Rend
                 marker: "".into(),
                 text: body.as_str().into(),
                 styled: Default::default(),
+                quote: false,
             }]);
             clear_conjugation(ui);
         }
@@ -1199,6 +1217,7 @@ fn apply_page(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, page: &Rend
                     marker: b.marker.as_str().into(),
                     text: b.text.as_str().into(),
                     styled: parse_markdown::<StyledText>(&b.md, &[]),
+                    quote: b.quote,
                 })
                 .collect();
             blocks_model.set_vec(blocks);
@@ -1779,7 +1798,15 @@ fn split_long(s: &str, max: usize) -> Vec<String> {
 struct Parsed {
     pronunciation: String,
     pos: String,
-    senses: Vec<String>,
+    senses: Vec<Sense>,
+}
+
+/// One numbered (or unnumbered) sense: its definition `body` plus any indented
+/// example/quotation lines GCIDE attaches to it, kept so the body pane can show
+/// them in a lighter italic style instead of dropping them.
+struct Sense {
+    body: String,
+    quotes: Vec<String>,
 }
 
 fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
@@ -1817,7 +1844,10 @@ fn parse_entry(raw: &str) -> Parsed {
         pos,
         senses: parse_senses(&text)
             .into_iter()
-            .map(|s| decode_gcide(&s))
+            .map(|s| Sense {
+                body: decode_gcide(&s.body),
+                quotes: s.quotes.iter().map(|q| decode_gcide(q)).collect(),
+            })
             .collect(),
     }
 }
@@ -1900,8 +1930,9 @@ fn collapse_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Split a GCIDE entry into its numbered senses (quotations dropped).
-fn parse_senses(text: &str) -> Vec<String> {
+/// Split a GCIDE entry into its numbered senses, keeping each sense's indented
+/// example/quotation lines so the body pane can render them in italic.
+fn parse_senses(text: &str) -> Vec<Sense> {
     static MARK: OnceLock<Regex> = OnceLock::new();
     let mark = re(&MARK, r"^\s*\d+\.\s+(.*)$");
     let lines: Vec<&str> = text.lines().collect();
@@ -1914,21 +1945,16 @@ fn parse_senses(text: &str) -> Vec<String> {
     let mut i = start;
     while i < lines.len() {
         if let Some(c) = mark.captures(lines[i]) {
-            let mut buf = c[1].trim().to_string();
+            // The marker line carries the start of the sense body; subsequent
+            // lines (until the next marker) are continuation prose or quotations.
+            let mut block = vec![c[1].as_ref()];
             i += 1;
             while i < lines.len() && !mark.is_match(lines[i]) {
-                if !is_quote(lines[i]) {
-                    let t = lines[i].trim();
-                    if !t.is_empty() {
-                        buf.push(' ');
-                        buf.push_str(t);
-                    }
-                }
+                block.push(lines[i]);
                 i += 1;
             }
-            let s = collapse_ws(&buf);
-            if !s.is_empty() {
-                senses.push(s);
+            if let Some(sense) = split_body_quotes(&block) {
+                senses.push(sense);
             }
         } else {
             i += 1;
@@ -1937,24 +1963,53 @@ fn parse_senses(text: &str) -> Vec<String> {
     senses
 }
 
+/// Partition one sense's lines into its definition body (non-indented prose) and
+/// its quotations (indented blocks / `-- attribution` lines), grouped by blank
+/// lines. Returns `None` if the body is empty.
+fn split_body_quotes(lines: &[&str]) -> Option<Sense> {
+    let mut body = String::new();
+    let mut quotes: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for line in lines {
+        let t = line.trim();
+        if t.is_empty() {
+            if !cur.is_empty() {
+                quotes.push(collapse_ws(&cur));
+                cur.clear();
+            }
+            continue;
+        }
+        if is_quote(line) {
+            cur.push(' ');
+            cur.push_str(t);
+        } else {
+            if !body.is_empty() {
+                body.push(' ');
+            }
+            body.push_str(t);
+        }
+    }
+    if !cur.is_empty() {
+        quotes.push(collapse_ws(&cur));
+    }
+    let body = collapse_ws(&body);
+    if body.is_empty() {
+        None
+    } else {
+        Some(Sense { body, quotes })
+    }
+}
+
 /// For entries without numbered senses: strip the header (pronunciation,
-/// etymology) and quotations, returning the remaining prose as a single sense.
-fn unnumbered_sense(text: &str) -> Option<String> {
+/// etymology), returning the remaining prose as a single sense plus any
+/// quotations attached to it.
+fn unnumbered_sense(text: &str) -> Option<Sense> {
     static PRON: OnceLock<Regex> = OnceLock::new();
     static BR: OnceLock<Regex> = OnceLock::new();
     let no_pron = re(&PRON, r"\\[^\\]*\\").replace_all(text, "");
     let no_etym = re(&BR, r"(?s)\[[^\[\]]*\]").replace_all(&no_pron, "");
-    let prose: String = no_etym
-        .lines()
-        .filter(|l| !is_quote(l))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let flat = collapse_ws(&prose);
-    if flat.is_empty() {
-        None
-    } else {
-        Some(flat)
-    }
+    let lines: Vec<&str> = no_etym.lines().collect();
+    split_body_quotes(&lines)
 }
 
 fn cleaned_plain(raw: &str) -> String {
@@ -2385,7 +2440,29 @@ mod tests {
         let parsed = parse_entry(raw);
         assert_eq!(parsed.pronunciation, "är·kē·ŏl·ō·jy̆");
         assert_eq!(parsed.pos, "noun");
-        assert_eq!(parsed.senses, vec!["The science of antiquities."]);
+        assert_eq!(parsed.senses.len(), 1);
+        assert_eq!(parsed.senses[0].body, "The science of antiquities.");
+        assert!(parsed.senses[0].quotes.is_empty());
+    }
+
+    #[test]
+    fn keeps_quotations_per_sense() {
+        // A numbered sense followed by an indented quotation with attribution.
+        // The quote is kept (not dropped) and attached to its sense.
+        let raw = "Test \\Test\\, n.\n   \
+                   1. A first meaning.\n\
+                   \x20         An illustrative quotation that\n\
+                   \x20         spans two lines.              --Author.\n   \
+                   2. A second meaning.\n";
+        let parsed = parse_entry(raw);
+        assert_eq!(parsed.senses.len(), 2);
+        assert_eq!(parsed.senses[0].body, "A first meaning.");
+        assert_eq!(
+            parsed.senses[0].quotes,
+            vec!["An illustrative quotation that spans two lines. --Author."]
+        );
+        assert_eq!(parsed.senses[1].body, "A second meaning.");
+        assert!(parsed.senses[1].quotes.is_empty());
     }
 
     #[test]

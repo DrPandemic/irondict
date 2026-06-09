@@ -30,6 +30,8 @@ struct DefBlock {
     marker: string,
     text: string,
     styled: styled-text,
+    // True for an indented example/quotation, rendered in lighter italic.
+    quote: bool,
 }
 
 // One conjugated form (e.g. "past" / "went", or "je" / "parle").
@@ -524,8 +526,10 @@ export component AppWindow inherits Window {
                         for b[i] in def-blocks: HorizontalLayout {
                             spacing: 8px;
                             alignment: start;
-                            padding-top: 4px;
-                            padding-bottom: 4px;
+                            padding-top: b.quote ? 2px : 4px;
+                            padding-bottom: b.quote ? 2px : 4px;
+                            // quotations hang under their sense body
+                            padding-left: b.quote ? 32px : 0px;
                             Text {
                                 visible: b.marker != "";
                                 text: b.marker;
@@ -534,7 +538,7 @@ export component AppWindow inherits Window {
                                 color: accent;
                                 width: b.marker != "" ? 24px : 0px;
                             }
-                            StyledText {
+                            if !b.quote : StyledText {
                                 text: b.styled;
                                 default-color: text-primary;
                                 link-color: accent;
@@ -542,6 +546,17 @@ export component AppWindow inherits Window {
                                 link-clicked(link) => {
                                     root.lookup-token(link);
                                 }
+                            }
+                            // Quotation/example: lighter italic prose. Slint can't
+                            // mix font runs in a styled-text, so quotes are a plain
+                            // italic Text rather than the markdown StyledText above.
+                            if b.quote : Text {
+                                text: b.text;
+                                font-italic: true;
+                                font-size: 15px;
+                                color: text-secondary;
+                                wrap: word-wrap;
+                                horizontal-stretch: 1;
                             }
                         }
                     }
