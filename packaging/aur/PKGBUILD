@@ -1,0 +1,54 @@
+# Maintainer: DrPandemic <your-email@example.com>
+pkgname=irondict
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Fast local multi-dictionary lookup with fuzzy and full-text search — CLI and GUI"
+arch=('x86_64')
+url="https://github.com/DrPandemic/irondict"
+license=('GPL-3.0-or-later')
+makedepends=('cargo')
+source=("https://github.com/DrPandemic/irondict/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('020b3d989c8ed46b0e2096f5d049641a2b8d7ab3210ead86fc2b85d71da55676')
+
+prepare() {
+    cd "$srcdir/$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+}
+
+build() {
+    cd "$srcdir/$pkgname-$pkgver"
+    cargo build --release -p irondict-gui -p irondict-cli
+}
+
+check() {
+    cd "$srcdir/$pkgname-$pkgver"
+    cargo test --release --workspace
+}
+
+package() {
+    cd "$srcdir/$pkgname-$pkgver"
+
+    install -Dm755 target/release/irondict-gui "$pkgdir/usr/bin/irondict-gui"
+    install -Dm755 target/release/irondict-cli "$pkgdir/usr/bin/irondict-cli"
+
+    install -Dm644 packaging/irondict.desktop \
+        "$pkgdir/usr/share/applications/irondict.desktop"
+
+    install -Dm644 crates/gui/assets/icons/irondict.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/irondict.svg"
+
+    for s in 16 32 48 64 128 256 512; do
+        install -Dm644 "crates/gui/assets/icons/hicolor/${s}x${s}/apps/irondict.png" \
+            "$pkgdir/usr/share/icons/hicolor/${s}x${s}/apps/irondict.png"
+    done
+
+    install -Dm644 crates/core/assets/gcide/dictd_www.dict.org_gcide.ifo \
+        "$pkgdir/usr/share/irondict/gcide/dictd_www.dict.org_gcide.ifo"
+    install -Dm644 crates/core/assets/gcide/dictd_www.dict.org_gcide.idx \
+        "$pkgdir/usr/share/irondict/gcide/dictd_www.dict.org_gcide.idx"
+    install -Dm644 crates/core/assets/gcide/dictd_www.dict.org_gcide.dict.dz \
+        "$pkgdir/usr/share/irondict/gcide/dictd_www.dict.org_gcide.dict.dz"
+
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 docs/gcide.md "$pkgdir/usr/share/licenses/$pkgname/gcide.md"
+}

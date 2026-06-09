@@ -998,7 +998,7 @@ fn word_of_the_moment(
             .nth_headword(seed)
             .map(|w| (w, Some(d.name().to_string())))
     })
-    .unwrap_or_else(|| ("irondict".to_string(), None))
+    .unwrap_or_else(|| ("IronDict".to_string(), None))
 }
 
 /// Map a scope index to the dictionary it restricts results to: index 0 ("All")

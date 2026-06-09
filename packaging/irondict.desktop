@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=irondict
+Name=IronDict
 GenericName=Dictionary
 Comment=Multi-dictionary lookup with fuzzy and full-text search
 Exec=irondict-gui
