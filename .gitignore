@@ -1,4 +1,9 @@
 /target
+
+# Nix build output symlinks
+/result
+/result-*
+
 packaging/aur/pkg/
 packaging/aur/src/
 packaging/aur/*.pkg.tar.zst
