@@ -164,11 +164,15 @@ so both share the same backend).
     `diction`→`Diction…`, exact `dictionary`, full-text `lexicographer`
     (definition-only hits), and second run reuses the cache.
 
-- [ ] **Phase 6 — GUI front-end (Slint).** `ui.slint` markup defines a
+- [x] **Phase 6 — GUI front-end (Slint).** `ui.slint` markup defines a
   search-as-you-type box → results list → definition pane, plus a dictionary
   management panel (add/remove/enable, show counts). `main.rs` wires Slint
   properties/callbacks to `DictionaryManager` + `SearchEngine`. A `build.rs` compiles
-  the `.slint` via `slint-build`.
+  the `.slint` via `slint-build`. **Done:** the full "toolbar layout" shipped — live
+  search-as-you-type wired to the backend (off-thread worker, see memory
+  `gui-search-worker-thread`), results card column + hero definition pane, word-of-the
+  -moment empty state, source pill, and OS accent/theme detection (`theme.rs`). The
+  dictionary-management panel was folded into the Phase 7 settings overlay.
 
   **Agreed design ("toolbar layout") — decided in look-and-feel discussion:**
   - **Framework:** Slint 1.x under its **GPLv3** option. Do **not** describe the
@@ -346,7 +350,7 @@ so both share the same backend).
   `conjugation/tests.rs` (9 tests over GCIDE-style fixtures + a French table). CLI
   `conjugate [--lang en|fr]`; GUI conjugation button + overlay.
 
-- [ ] **Phase 9 — Polish.** Rich definition rendering and navigation. Already done
+- [x] **Phase 9 — Polish.** Rich definition rendering and navigation. Already done
   this round (GUI): HTML entries lift the pronunciation / part-of-speech /
   etymology onto the header (matching GCIDE), Wingdings dividers dropped, sense
   markers (bullets + arabic numbers) moved into a hanging marker column, the
@@ -355,26 +359,29 @@ so both share the same backend).
   navigation (↑/↓ through results with scroll-into-view, Esc closes overlays).
   Remaining items:
 
-  - [ ] **Clickable cross-references.** Two complementary mechanisms, since Slint
-    cannot colour or hit-test individual words inside wrapping prose (no inline-run
-    layout): (1) **double-click any body word** to look it up — the body
-    `SelectableText` reports the selected slice (`lookup-token` with byte offsets);
-    multi-word drag-selections contain whitespace and are rejected, so copying a
-    phrase doesn't trigger a look-up; the active word highlights in the accent
-    colour. (2) A **"Related" chip row** of the references the entry marks up —
-    colour/italic spans for HTML entries, `{…}` braces for GCIDE — **filtered to
-    terms that actually resolve** in the active scope so chips never dead-end (e.g.
-    on an etymology entry the language labels `latin`/`español` drop out and the real
-    cross-referenced words `tenir`/`devoir`/`dette` remain). Both record history.
-  - [ ] **Synonym styling.** The resolved cross-references render as accent-coloured
-    "Related" chips (clickable), visually distinct from the prose. This is the
-    Slint-feasible form of "styled links" — inline per-word colouring isn't possible.
-  - [ ] **Back / forward history.** Browser-style stack of viewed entries
-    (`History` in the GUI), recorded on every selection (result click + arrow-nav,
-    and later cross-references). Navigate with the keyboard (Alt+← / Alt+→, and
-    Backspace when the search box isn't focused) **and** ‹ / › buttons in the
-    toolbar (greyed out at the ends). Restores the entry and its scope; the body
-    scroll resets to the top on each new entry (`changed def-blocks`).
+  - [x] **Clickable cross-references.** **Implemented as inline accent-coloured
+    links** — superseding the originally-planned "double-click word + Related chip
+    row" workaround. That workaround assumed Slint "cannot colour or hit-test
+    individual words inside wrapping prose"; that turned out false — `StyledText`
+    with `link-color`/`link-clicked` does exactly that. So the body renders each
+    block as markdown (`def-blocks[i].styled`) with cross-references converted to
+    `[label](lookup://target)` links: GCIDE `{braces}` and HTML `bword://` anchors →
+    accent-coloured clickable spans that route through the `lookup-token` callback
+    and record history. (See memory `slint-no-inline-rich-text`.)
+  - [x] **Synonym styling.** Covered by the inline links above: cross-reference /
+    synonym runs render in the accent colour (`StyledText { link-color: accent }`),
+    visually distinct from the `text-primary` prose. The separate "Related chips"
+    form is unnecessary now that inline per-word colouring works.
+  - [x] **Back / forward history.** Browser-style stack of viewed entries
+    (`NavHistory`/`NavEntry` in the GUI), recorded on every selection (result click +
+    arrow-nav, and later cross-references). Navigate with the keyboard (Alt+← / Alt+→,
+    and Backspace when the search box isn't focused) and the mouse back/forward
+    buttons (routed through the outer `TouchArea`). **No toolbar ‹ / › buttons** —
+    keeping the toolbar arrow-free matches the Phase 6 "no back/forward history
+    arrows" design decision. Restores the entry and its scope; the body scroll resets
+    to the top on each new entry (`changed def-blocks`). (`can-go-back`/`can-go-forward`
+    + `navigate-back`/`navigate-forward` glue stays exposed for the keyboard/mouse
+    paths.)
   - [x] **Italic examples / quotations.** Petit Robert italicises examples; GCIDE
     used to *drop* its quotations — now they're kept and shown in a lighter italic
     style. Per-block styling (a block carries a `quote` flag), since Slint can't mix
@@ -386,12 +393,19 @@ so both share the same backend).
     `quote` flag, and the body `ListView` renders quotes as a plain italic
     `text-secondary` `Text` (indented under the sense) instead of the markdown
     `StyledText` used for prose (so quotes aren't clickable — they're illustrative).
-  - [ ] **Synonym styling.** Render the cross-reference / synonym runs in the accent
-    (or secondary) colour so they read as distinct from the definition prose; ties
-    in with the clickable-cross-reference span model above.
-  - [ ] **Packaging.** Distributable build: bundle the GCIDE asset cleanly with
-    license + provenance docs (GPL-2.0-or-later, recorded in `docs/`), an app icon,
-    a Linux `.desktop` entry, and a release profile / packaging recipe.
+  - [x] **Packaging.** Distributable build, documented in
+    [`docs/packaging.md`](docs/packaging.md). **Implemented:** (1) a workspace
+    `[profile.release]` (`lto = "thin"`, `codegen-units = 1`, `strip = "symbols"`);
+    (2) an app icon — `crates/gui/assets/icons/irondict.svg` (open book on the indigo
+    accent tile) rastered to `hicolor/<size>/apps/irondict.png` and set as the runtime
+    window icon via the Slint `icon:` property; (3) a freedesktop
+    `packaging/irondict.desktop` (validates clean); (4) **runtime GCIDE resolution** —
+    `bundled_gcide_path()` no longer hard-codes the compile-time source path; it
+    searches `$IRONDICT_GCIDE_DIR` → `<exe>/../share/irondict/gcide` → `$XDG_DATA_DIRS`
+    → the in-tree dev asset, so an installed binary finds the data at
+    `<prefix>/share/irondict/gcide/` while in-tree builds/tests are unchanged; (5)
+    install layout + recipe + license/provenance (GCIDE GPL-2.0-or-later via
+    `docs/gcide.md`, IBM Plex Sans SIL OFL, Slint GPLv3) in `docs/packaging.md`.
 
   Deferred: search history (recently-viewed when the box is empty) — largely covered
   by back/forward history + word-of-the-moment.

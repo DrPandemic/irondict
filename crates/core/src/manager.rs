@@ -4,13 +4,48 @@ use crate::config::{Config, DictionaryConfig, Language, Preferences};
 use crate::model::{Dictionary, Entry};
 use crate::Error;
 
-/// Path to the GCIDE StarDict files bundled with the core crate (Phase 2 asset).
+/// Basename of the bundled GCIDE StarDict header (Phase 2 asset).
+const GCIDE_IFO: &str = "dictd_www.dict.org_gcide.ifo";
+
+/// Path to the bundled GCIDE `.ifo`, resolved at runtime so a packaged binary
+/// finds the data wherever it was installed while an in-tree build still uses the
+/// crate's `assets/`. Search order (first existing wins):
 ///
-/// Resolved relative to the crate source at compile time, which is fine for
-/// development; real installs will resolve this from a packaged location in a
-/// later phase.
+/// 1. `$IRONDICT_GCIDE_DIR` — explicit override.
+/// 2. `<exe-dir>/../share/irondict/gcide` — relative to the installed binary, so
+///    any install `--prefix` works (`/usr/bin` → `/usr/share/irondict/gcide`).
+/// 3. system data dirs from `$XDG_DATA_DIRS` (default `/usr/local/share:/usr/share`),
+///    each `<dir>/irondict/gcide`.
+/// 4. the compile-time source asset (`CARGO_MANIFEST_DIR/assets/gcide`) — dev fallback.
+///
+/// If none exist (e.g. an install that didn't ship the data), returns the
+/// dev-asset path so callers report a sensible location; loading then fails
+/// gracefully as a warning rather than a crash.
 pub fn bundled_gcide_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/gcide/dictd_www.dict.org_gcide.ifo")
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Some(dir) = std::env::var_os("IRONDICT_GCIDE_DIR") {
+        candidates.push(PathBuf::from(dir));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bin_dir) = exe.parent() {
+            candidates.push(bin_dir.join("../share/irondict/gcide"));
+        }
+    }
+    let data_dirs = std::env::var_os("XDG_DATA_DIRS")
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".to_string());
+    for dir in data_dirs.split(':').filter(|s| !s.is_empty()) {
+        candidates.push(Path::new(dir).join("irondict/gcide"));
+    }
+    let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/gcide");
+    candidates.push(dev.clone());
+
+    candidates
+        .into_iter()
+        .map(|dir| dir.join(GCIDE_IFO))
+        .find(|ifo| ifo.is_file())
+        .unwrap_or_else(|| dev.join(GCIDE_IFO))
 }
 
 /// A loaded dictionary together with the bookkeeping the manager needs:

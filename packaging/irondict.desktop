@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=irondict
+GenericName=Dictionary
+Comment=Multi-dictionary lookup with fuzzy and full-text search
+Exec=irondict-gui
+Icon=irondict
+Terminal=false
+Categories=Office;Dictionary;
+Keywords=dictionary;define;definition;lookup;thesaurus;stardict;
+StartupWMClass=irondict

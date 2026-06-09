@@ -136,7 +136,9 @@ enum WorkerMsg {
         results: Box<RenderedResults>,
     },
     /// A search arrived before the index was ready.
-    NoEngine { gen: u64 },
+    NoEngine {
+        gen: u64,
+    },
     IndexReady,
     BuildError(String),
 }
@@ -563,7 +565,10 @@ fn main() -> Result<(), slint::PlatformError> {
             gen.set(gen.get() + 1);
             let filter = scope_filter(ui.get_scope(), &manager);
             // The clicked link is a `lookup://<word>` URL; strip the scheme.
-            let word = link.as_str().strip_prefix("lookup://").unwrap_or(link.as_str());
+            let word = link
+                .as_str()
+                .strip_prefix("lookup://")
+                .unwrap_or(link.as_str());
             navigate(
                 &ui,
                 &manager,
@@ -2490,7 +2495,9 @@ mod tests {
         assert_eq!(strip_link_markers(&blocks[0]), "voir alpha et beta gamma.");
         // No sentinel chars leak into the plain text.
         let plain = strip_link_markers(&blocks[0]);
-        assert!(!plain.contains(LINK_OPEN) && !plain.contains(LINK_SEP) && !plain.contains(LINK_CLOSE));
+        assert!(
+            !plain.contains(LINK_OPEN) && !plain.contains(LINK_SEP) && !plain.contains(LINK_CLOSE)
+        );
     }
 
     #[test]
@@ -2509,7 +2516,10 @@ mod tests {
             bword_target("a href=\"bword://aller%20%C3%A0\"").as_deref(),
             Some("aller à")
         );
-        assert_eq!(bword_target("A HREF=\"bword://chien\"").as_deref(), Some("chien"));
+        assert_eq!(
+            bword_target("A HREF=\"bword://chien\"").as_deref(),
+            Some("chien")
+        );
         assert_eq!(bword_target("a href=\"http://x\""), None);
         assert_eq!(bword_target("a name=\"y\""), None);
     }

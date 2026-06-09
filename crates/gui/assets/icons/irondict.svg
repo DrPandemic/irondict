@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- irondict app icon: an open book on an indigo tile, matching the GUI's
+       fallback accent (#4F46E5). Greyscale-on-accent like the rest of the app. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#4F46E5"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="512" height="512" rx="112" ry="112" fill="url(#tile)"/>
+
+  <!-- open book: two pages meeting at a central spine -->
+  <g fill="#ffffff">
+    <!-- left page -->
+    <path d="M256 150
+             C 214 124, 158 116, 110 122
+             C 102 123, 96 130, 96 138
+             L 96 360
+             C 96 369, 104 375, 113 373
+             C 157 367, 212 374, 256 398
+             Z"/>
+    <!-- right page -->
+    <path d="M256 150
+             C 298 124, 354 116, 402 122
+             C 410 123, 416 130, 416 138
+             L 416 360
+             C 416 369, 408 375, 399 373
+             C 355 367, 300 374, 256 398
+             Z"/>
+  </g>
+
+  <!-- text lines + spine, drawn in the accent so they read as ruling -->
+  <g stroke="#4F46E5" stroke-linecap="round" fill="none">
+    <line x1="256" y1="158" x2="256" y2="392" stroke-width="6" opacity="0.55"/>
+    <g stroke-width="11" opacity="0.85">
+      <line x1="132" y1="178" x2="226" y2="194"/>
+      <line x1="132" y1="218" x2="226" y2="234"/>
+      <line x1="132" y1="258" x2="226" y2="274"/>
+      <line x1="132" y1="298" x2="200" y2="310"/>
+    </g>
+    <g stroke-width="11" opacity="0.85">
+      <line x1="286" y1="194" x2="380" y2="178"/>
+      <line x1="286" y1="234" x2="380" y2="218"/>
+      <line x1="286" y1="274" x2="380" y2="258"/>
+      <line x1="312" y1="310" x2="380" y2="298"/>
+    </g>
+  </g>
+</svg>

@@ -10,3 +10,12 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
+
+# Distributable build: optimize and drop debug symbols so the shipped binary is
+# lean. `lto = "thin"` + `codegen-units = 1` give most of the whole-program win
+# at a fraction of fat-LTO's build cost; panic unwinding is kept (Slint /
+# async-std rely on it).
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
