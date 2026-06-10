@@ -157,6 +157,16 @@ impl DictionaryManager {
         self.dicts.len() != before
     }
 
+    /// Remove the dictionary loaded from `path`. Returns whether anything was
+    /// removed. Preferred over [`remove`](Self::remove) for downloaded
+    /// dictionaries, since it targets the exact file rather than a (possibly
+    /// shared) display name.
+    pub fn remove_path(&mut self, path: &Path) -> bool {
+        let before = self.dicts.len();
+        self.dicts.retain(|d| d.path != path);
+        self.dicts.len() != before
+    }
+
     /// Enable or disable the dictionary with the given name. Returns whether a
     /// matching dictionary was found.
     pub fn set_enabled(&mut self, name: &str, enabled: bool) -> bool {

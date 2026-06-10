@@ -94,12 +94,32 @@ fn fuzzy_prefix_guard_rejects_first_char_change() {
 }
 
 #[test]
-fn full_text_finds_word_inside_a_definition() {
+fn cancelled_build_yields_no_engine() {
+    let mut mgr = DictionaryManager::new();
+    mgr.add(mini_path()).unwrap();
+    let dir = TempDir::new().unwrap();
+    // A cancel that fires immediately must abandon the build and commit nothing.
+    let outcome = SearchEngine::build_cancellable(dir.path(), &mut mgr, || true).unwrap();
+    assert!(outcome.is_none());
+    // The abandoned index isn't usable; a fresh, uncancelled build still works.
+    let engine = SearchEngine::build(dir.path(), &mut mgr).unwrap();
+    let hits = engine.search("hello", SearchMode::Exact, 10).unwrap();
+    assert_eq!(hits.len(), 1);
+}
+
+#[test]
+fn full_text_matches_headwords_not_definitions() {
     let (_dir, engine) = engine_over_mini();
-    // "furry" appears only in the definition of "cat" ("a furry animal").
+    // "furry" appears only in the definition of "cat" ("a furry animal"), not as
+    // a headword — search matches headwords only, so it must not surface "cat".
     let hits = engine.search("furry", SearchMode::FullText, 10).unwrap();
-    let words: Vec<&str> = hits.iter().map(|h| h.headword.as_str()).collect();
-    assert!(words.contains(&"cat"));
+    assert!(hits.is_empty());
+    // The headword itself still matches, and the definition is still stored for
+    // the result snippet even though it isn't searchable.
+    let hits = engine.search("cat", SearchMode::FullText, 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].headword, "cat");
+    assert!(hits[0].snippet.contains("furry"));
 }
 
 #[test]

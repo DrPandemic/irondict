@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 use irondict_core::{
-    bundled_gcide_path, search, Config, Conjugation, ConjugatorRegistry, DictionaryConfig,
-    DictionaryManager, Language, SearchEngine, SearchMode,
+    bundled_gcide_path, download, search, Config, Conjugation, ConjugatorRegistry, DictionaryConfig,
+    DictionaryManager, Language, Progress, SearchEngine, SearchMode,
 };
 
 mod gui;
@@ -55,6 +55,18 @@ enum Command {
     Add {
         /// Path to the dictionary's `.ifo` file.
         path: PathBuf,
+    },
+    /// List the dictionaries available to download.
+    Catalog,
+    /// Download and install a dictionary from the catalog by id (e.g. `en-en`).
+    Install {
+        /// Catalog id, as shown by `catalog`.
+        id: String,
+    },
+    /// Delete an installed catalog dictionary (files + registration).
+    Uninstall {
+        /// Catalog id, as shown by `catalog`.
+        id: String,
     },
     /// List the managed dictionaries.
     List,
@@ -127,6 +139,9 @@ fn main() -> Result<()> {
         Some(Command::Conjugate { verb, lang }) => conjugate(&verb, lang.map(Into::into)),
         Some(Command::Search { query, mode, limit }) => run_search(&query, mode.into(), limit),
         Some(Command::Add { path }) => add(path),
+        Some(Command::Catalog) => catalog(),
+        Some(Command::Install { id }) => install(&id),
+        Some(Command::Uninstall { id }) => uninstall(&id),
         Some(Command::List) => list(),
         Some(Command::Remove { name }) => remove(&name),
         Some(Command::Enable { name }) => set_enabled(&name, true),
@@ -338,6 +353,88 @@ fn add(path: PathBuf) -> Result<()> {
         "Added \"{name}\" ({word_count} words) from {}",
         path.display()
     );
+    Ok(())
+}
+
+/// Format a byte count as a short human-readable size (e.g. `98.0 MB`).
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+fn catalog() -> Result<()> {
+    for entry in download::catalog() {
+        let state = if download::is_installed(entry.id) {
+            "installed"
+        } else {
+            "available"
+        };
+        println!(
+            "{:<7} {:<26} ~{:>8}  [{state}]  {}",
+            entry.id,
+            entry.label,
+            human_size(entry.approx_size),
+            entry.license,
+        );
+    }
+    Ok(())
+}
+
+/// Download a catalog dictionary, install it under the data dir, and register it
+/// in the config (pinning its language) so it participates in lookups.
+fn install(id: &str) -> Result<()> {
+    let entry = download::find(id)
+        .with_context(|| format!("no dictionary with id \"{id}\" in the catalog"))?;
+
+    println!("Downloading {} ({})...", entry.label, entry.source);
+    let mut last_pct = u8::MAX;
+    let ifo = download::install(entry, |Progress::Downloading { received, total }| {
+        if let Some(total) = total.filter(|t| *t > 0) {
+            let pct = (received * 100 / total) as u8;
+            if pct != last_pct {
+                last_pct = pct;
+                eprint!("\r  {pct:>3}%  ({} / {})", human_size(received), human_size(total));
+            }
+        }
+    })
+    .with_context(|| format!("installing {id}"))?;
+    eprintln!();
+
+    let mut manager = load_manager()?;
+    let dict = manager
+        .add(&ifo)
+        .with_context(|| format!("loading installed dictionary at {}", ifo.display()))?;
+    let name = dict.name().to_string();
+    let word_count = dict.dictionary.info.word_count;
+    manager.set_language(&name, entry.language);
+    save_manager(&manager)?;
+
+    println!("Installed \"{name}\" ({word_count} words) at {}", ifo.display());
+    Ok(())
+}
+
+/// Unregister an installed catalog dictionary and delete its files from disk.
+fn uninstall(id: &str) -> Result<()> {
+    download::find(id).with_context(|| format!("no dictionary with id \"{id}\" in the catalog"))?;
+    let ifo = download::installed_ifo(id)
+        .with_context(|| format!("dictionary \"{id}\" is not installed"))?;
+
+    let mut manager = load_manager()?;
+    manager.remove_path(&ifo);
+    save_manager(&manager)?;
+    download::uninstall(id).with_context(|| format!("deleting files for {id}"))?;
+
+    println!("Uninstalled \"{id}\".");
     Ok(())
 }
 

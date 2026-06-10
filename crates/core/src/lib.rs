@@ -1,11 +1,13 @@
 pub mod config;
 pub mod conjugation;
+pub mod download;
 pub mod manager;
 pub mod model;
 pub mod search;
 pub mod stardict;
 
 pub use config::{Config, DictionaryConfig, Language, Preferences, ThemeMode};
+pub use download::{CatalogEntry, Progress};
 pub use conjugation::{
     ConjForm, ConjSection, Conjugation, Conjugator, ConjugatorRegistry, EnglishConjugator,
     FrenchConjugator,
@@ -25,6 +27,9 @@ pub enum Error {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("download error: {0}")]
+    Download(String),
 
     #[error("config parse error: {0}")]
     ConfigParse(#[from] toml::de::Error),

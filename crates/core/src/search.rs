@@ -20,7 +20,7 @@ pub enum SearchMode {
     Prefix,
     /// Typo-tolerant headword match (Levenshtein distance up to 2).
     Fuzzy,
-    /// Free-text match across headwords and definitions (BM25 ranked).
+    /// Tokenized headword match (BM25 ranked); handles multi-word headwords.
     FullText,
 }
 
@@ -50,7 +50,8 @@ struct Fields {
     key: Field,
     /// Original-case headword, tokenized for full-text and stored for display.
     headword: Field,
-    /// Definition text, tokenized for full-text and stored for snippets.
+    /// Definition preview, stored for result snippets only — not tokenized, so
+    /// searches match the headword, never the body text.
     definition: Field,
 }
 
@@ -60,14 +61,15 @@ fn schema() -> (Schema, Fields) {
         dictionary: builder.add_text_field("dictionary", STRING | STORED),
         key: builder.add_text_field("key", STRING),
         headword: builder.add_text_field("headword", TEXT | STORED),
-        definition: builder.add_text_field("definition", TEXT | STORED),
+        definition: builder.add_text_field("definition", STORED),
     };
     (builder.build(), fields)
 }
 
-/// A search index over the headwords and definitions of the enabled
-/// dictionaries. Backed by a tantivy index stored on disk so it can be cached
-/// across runs and only rebuilt when the set of dictionaries changes.
+/// A search index over the headwords of the enabled dictionaries (definitions
+/// are stored for previews but not searchable). Backed by a tantivy index stored
+/// on disk so it can be cached across runs and only rebuilt when the set of
+/// dictionaries changes.
 pub struct SearchEngine {
     index: Index,
     reader: IndexReader,
@@ -89,6 +91,20 @@ impl SearchEngine {
     /// Build (or rebuild) the index in `dir` from the manager's enabled
     /// dictionaries, replacing any existing index there.
     pub fn build(dir: &Path, manager: &mut DictionaryManager) -> Result<Self, Error> {
+        Self::build_cancellable(dir, manager, || false)
+            .map(|engine| engine.expect("a build that never cancels always yields an engine"))
+    }
+
+    /// Like [`build`](Self::build), but `cancel` is polled periodically while
+    /// indexing; when it returns `true` the build is abandoned and `Ok(None)` is
+    /// returned (no partial index is committed). Used by the GUI so deleting or
+    /// changing a dictionary stops an in-flight build instead of finishing a
+    /// now-stale one.
+    pub fn build_cancellable(
+        dir: &Path,
+        manager: &mut DictionaryManager,
+        mut cancel: impl FnMut() -> bool,
+    ) -> Result<Option<Self>, Error> {
         std::fs::create_dir_all(dir)?;
         let (schema, fields) = schema();
 
@@ -111,8 +127,18 @@ impl SearchEngine {
 
         let mut writer = index.writer(50_000_000).map_err(map_err)?;
         let mut indexing_error = None;
+        let mut cancelled = false;
+        // Poll `cancel` on the first entry and then once per batch, so the check's
+        // cost stays negligible on large dictionaries while still catching a
+        // cancellation early on small ones.
+        let mut seen: u64 = 0;
         manager.for_each_enabled_entry(|name, entry| {
-            if indexing_error.is_some() {
+            if indexing_error.is_some() || cancelled {
+                return;
+            }
+            seen += 1;
+            if seen % 4096 == 1 && cancel() {
+                cancelled = true;
                 return;
             }
             let definition: String = entry
@@ -121,11 +147,17 @@ impl SearchEngine {
                 .map(|s| s.text.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
+            // Store only a leading preview (the body isn't searchable, just shown
+            // as a result snippet), keeping the on-disk index small.
+            let snippet = match definition.char_indices().nth(SNIPPET_LEN) {
+                Some((idx, _)) => &definition[..idx],
+                None => &definition,
+            };
             let result = writer.add_document(doc!(
                 fields.dictionary => name,
                 fields.key => entry.headword.to_lowercase(),
                 fields.headword => entry.headword,
-                fields.definition => definition,
+                fields.definition => snippet,
             ));
             if let Err(e) = result {
                 indexing_error = Some(map_err(e));
@@ -134,14 +166,20 @@ impl SearchEngine {
         if let Some(e) = indexing_error {
             return Err(e);
         }
+        if cancelled {
+            // Drop the writer without committing; the partial segments are left
+            // for the next build's create-in-dir cleanup to clear.
+            drop(writer);
+            return Ok(None);
+        }
         writer.commit().map_err(map_err)?;
 
         let reader = index.reader().map_err(map_err)?;
-        Ok(Self {
+        Ok(Some(Self {
             index,
             reader,
             fields,
-        })
+        }))
     }
 
     /// Open an index previously built in `dir`.
@@ -196,10 +234,7 @@ impl SearchEngine {
             }
             SearchMode::Fuzzy => unreachable!("handled above"),
             SearchMode::FullText => {
-                let parser = QueryParser::for_index(
-                    &self.index,
-                    vec![self.fields.headword, self.fields.definition],
-                );
+                let parser = QueryParser::for_index(&self.index, vec![self.fields.headword]);
                 let (parsed, _errors) = parser.parse_query_lenient(query);
                 parsed
             }

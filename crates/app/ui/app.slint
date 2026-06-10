@@ -22,6 +22,16 @@ struct DictRow {
     language: int,  // 0 = Auto, 1 = English, 2 = French
 }
 
+// One downloadable dictionary in the settings "Download" section. `status` is
+// 0 = available, 1 = downloading, 2 = installed; `progress` is 0..1 while
+// downloading.
+struct CatalogRow {
+    label: string,
+    detail: string,   // size + license line
+    status: int,
+    progress: float,
+}
+
 // One block of a definition body. `marker` is the hanging sense marker shown in
 // the left column (a number like "1." or a bullet like "■"); empty for plain
 // paragraphs. `text` is the plain-text variant (used for snippets); `styled` is
@@ -111,6 +121,7 @@ export component AppWindow inherits Window {
     // ---- settings page ----
     in-out property <bool> show-settings: false;
     in property <[DictRow]> dict-items;
+    in property <[CatalogRow]> catalog-items;
     in property <int> theme-mode: 0;          // 0 System, 1 Light, 2 Dark
     in property <[color]> accent-swatches;
     in property <int> accent-choice: 0;       // 0 System, n = swatch n-1
@@ -131,6 +142,8 @@ export component AppWindow inherits Window {
     callback set-dict-language(int, int);
     callback remove-dict(int);
     callback add-dict();
+    callback download-dict(int);
+    callback delete-dict(int);
     callback set-theme-mode(int);
     callback set-accent(int);
 
@@ -720,6 +733,100 @@ export component AppWindow inherits Window {
                     Button {
                         text: "Add dictionary…";
                         clicked => { root.add-dict(); }
+                    }
+                }
+
+                Text {
+                    text: "DOWNLOAD";
+                    font-size: 11px;
+                    font-weight: 600;
+                    color: accent;
+                }
+
+                ScrollView {
+                    height: 150px;
+                    VerticalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        for c[i] in catalog-items: Rectangle {
+                            height: 50px;
+                            border-radius: 8px;
+                            background: control-bg;
+                            border-width: 1px;
+                            border-color: divider;
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 10px;
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    spacing: 2px;
+                                    Text {
+                                        text: c.label;
+                                        font-size: 14px;
+                                        font-weight: 500;
+                                        color: text-primary;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: c.status == 1
+                                            ? "Downloading… " + Math.round(c.progress * 100) + "%"
+                                            : c.detail;
+                                        font-size: 12px;
+                                        color: text-secondary;
+                                    }
+                                }
+                                if c.status == 2: HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: "✓ Installed";
+                                        font-size: 13px;
+                                        color: text-secondary;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle {
+                                        width: 28px;
+                                        border-radius: 6px;
+                                        background: delete-touch.has-hover ? divider : transparent;
+                                        delete-touch := TouchArea {
+                                            clicked => { root.delete-dict(i); }
+                                        }
+                                        Text {
+                                            text: "🗑";
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            font-size: 13px;
+                                            color: text-secondary;
+                                        }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    if c.status != 2: Rectangle {
+                                        width: 96px;
+                                        height: 30px;
+                                        border-radius: 6px;
+                                        background: c.status == 1
+                                            ? divider
+                                            : (dl-touch.has-hover ? accent : control-bg);
+                                        border-width: 1px;
+                                        border-color: divider;
+                                        Text {
+                                            text: c.status == 1 ? Math.round(c.progress * 100) + "%" : "Download";
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            font-size: 13px;
+                                            color: (dl-touch.has-hover && c.status == 0) ? #ffffff : text-primary;
+                                        }
+                                        dl-touch := TouchArea {
+                                            enabled: c.status == 0;
+                                            clicked => { root.download-dict(i); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 

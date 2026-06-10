@@ -14,11 +14,11 @@ use std::time::Duration;
 
 use regex::Regex;
 use slint::private_unstable_api::re_exports::{parse_markdown, StyledText};
-use slint::{Color, ModelRc, SharedString, Timer, TimerMode, VecModel};
+use slint::{Color, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use irondict_core::{
-    bundled_gcide_path, search, Config, ConjugatorRegistry, DictionaryConfig, DictionaryManager,
-    Language, Preferences, SearchEngine, SearchMode, ThemeMode,
+    bundled_gcide_path, download, search, Config, ConjugatorRegistry, DictionaryConfig,
+    DictionaryManager, Language, Preferences, Progress, SearchEngine, SearchMode, ThemeMode,
 };
 
 /// Preset accent swatches offered in the settings page, in display order. Index
@@ -248,20 +248,30 @@ fn index_signature(manager: &DictionaryManager) -> String {
 /// so the first keystroke is snappy. Runs on the worker thread with the worker's
 /// own manager, so the same call covers first launch and post-settings rebuilds
 /// (a changed dictionary set yields a new signature, which forces a rebuild).
-fn prepare_engine(manager: &mut DictionaryManager) -> Result<SearchEngine, String> {
+/// Open the cached index when it matches, else (re)build it. `cancel` is polled
+/// during a build so a superseding request (e.g. a deleted dictionary) abandons
+/// it; in that case the result is `Ok(None)`.
+fn prepare_engine(
+    manager: &mut DictionaryManager,
+    cancel: impl FnMut() -> bool,
+) -> Result<Option<SearchEngine>, String> {
     let dir = search::default_index_dir().map_err(|e| e.to_string())?;
     let signature = index_signature(manager);
     let cached = std::fs::read_to_string(dir.join("manifest")).ok();
     if cached.as_deref() == Some(signature.as_str()) {
         if let Ok(engine) = SearchEngine::open(&dir) {
             warm_up(&engine);
-            return Ok(engine);
+            return Ok(Some(engine));
         }
     }
-    let engine = SearchEngine::build(&dir, manager).map_err(|e| e.to_string())?;
-    let _ = std::fs::write(dir.join("manifest"), &signature);
-    warm_up(&engine);
-    Ok(engine)
+    match SearchEngine::build_cancellable(&dir, manager, cancel).map_err(|e| e.to_string())? {
+        Some(engine) => {
+            let _ = std::fs::write(dir.join("manifest"), &signature);
+            warm_up(&engine);
+            Ok(Some(engine))
+        }
+        None => Ok(None),
+    }
 }
 
 /// The search worker: owns its own manager + index and serves search/lookup work
@@ -272,17 +282,21 @@ fn prepare_engine(manager: &mut DictionaryManager) -> Result<SearchEngine, Strin
 fn run_worker(req_rx: mpsc::Receiver<WorkerReq>, resp_tx: mpsc::Sender<WorkerMsg>) {
     let mut manager = load_manager();
     let mut engine: Option<SearchEngine> = None;
-    match prepare_engine(&mut manager) {
-        Ok(e) => {
-            engine = Some(e);
-            let _ = resp_tx.send(WorkerMsg::IndexReady);
-        }
-        Err(msg) => {
-            let _ = resp_tx.send(WorkerMsg::BuildError(msg));
-        }
-    }
+    // A control request pulled off the channel while a build was running, to be
+    // handled before blocking for the next one.
+    let mut pending: Option<WorkerReq> = None;
+    rebuild_index(&mut engine, &mut manager, &req_rx, &resp_tx, &mut pending);
 
-    while let Ok(req) = req_rx.recv() {
+    loop {
+        // A superseding request captured during a cancelled build takes priority;
+        // otherwise block for the next one.
+        let req = match pending.take() {
+            Some(req) => req,
+            None => match req_rx.recv() {
+                Ok(req) => req,
+                Err(_) => break,
+            },
+        };
         match req {
             WorkerReq::Search { gen, query, scope } => match &engine {
                 Some(eng) => {
@@ -300,20 +314,52 @@ fn run_worker(req_rx: mpsc::Receiver<WorkerReq>, resp_tx: mpsc::Sender<WorkerMsg
                 // Pick up any language pins / dictionary-set changes the UI saved.
                 manager = load_manager();
                 if rebuild {
-                    // The old index keeps serving queued searches only after this
-                    // returns; while it builds the UI shows "Indexing…".
-                    match prepare_engine(&mut manager) {
-                        Ok(e) => {
-                            engine = Some(e);
-                            let _ = resp_tx.send(WorkerMsg::IndexReady);
-                        }
-                        Err(msg) => {
-                            let _ = resp_tx.send(WorkerMsg::BuildError(msg));
-                        }
-                    }
+                    rebuild_index(&mut engine, &mut manager, &req_rx, &resp_tx, &mut pending);
                 }
             }
             WorkerReq::Shutdown => break,
+        }
+    }
+}
+
+/// (Re)build the index, watching `req_rx` for a newer request so the build can be
+/// abandoned the moment the dictionary set changes again (e.g. a delete). Search
+/// requests that arrive mid-build can't be served, so they're answered with
+/// `NoEngine` (the UI retries on the next `IndexReady`); a `Reload`/`Shutdown`
+/// supersedes the build and is stashed in `pending` for the worker loop.
+fn rebuild_index(
+    engine: &mut Option<SearchEngine>,
+    manager: &mut DictionaryManager,
+    req_rx: &mpsc::Receiver<WorkerReq>,
+    resp_tx: &mpsc::Sender<WorkerMsg>,
+    pending: &mut Option<WorkerReq>,
+) {
+    let cancel = || loop {
+        match req_rx.try_recv() {
+            Ok(WorkerReq::Search { gen, .. }) => {
+                let _ = resp_tx.send(WorkerMsg::NoEngine { gen });
+            }
+            Ok(other) => {
+                *pending = Some(other);
+                return true;
+            }
+            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                *pending = Some(WorkerReq::Shutdown);
+                return true;
+            }
+        }
+    };
+    match prepare_engine(manager, cancel) {
+        Ok(Some(e)) => {
+            *engine = Some(e);
+            let _ = resp_tx.send(WorkerMsg::IndexReady);
+        }
+        // Cancelled: a superseding request is now pending, which will drive the
+        // next (correct) rebuild. Keep the previous engine state untouched.
+        Ok(None) => {}
+        Err(msg) => {
+            let _ = resp_tx.send(WorkerMsg::BuildError(msg));
         }
     }
 }
@@ -344,6 +390,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
     ui.set_dict_items(ModelRc::from(dict_items.clone()));
     let scopes: Rc<VecModel<SharedString>> = Rc::new(VecModel::default());
     ui.set_scopes(ModelRc::from(scopes.clone()));
+    let catalog_items: Rc<VecModel<CatalogRow>> = Rc::new(VecModel::default());
+    ui.set_catalog_items(ModelRc::from(catalog_items.clone()));
+    catalog_items.set_vec(build_catalog_rows());
 
     // Scope control ("All" + enabled dictionaries) and the settings dictionary
     // list are both derived from the manager.
@@ -794,6 +843,143 @@ pub fn run() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // ---- settings: download a dictionary from the catalog ----
+    // Each download runs on its own worker thread; progress and completion come
+    // back over a channel and are applied on the UI thread by `dl_timer`. The
+    // row index is stable (the catalog is fixed-order) so it doubles as the
+    // dictionary's id between threads.
+    let (dl_tx, dl_rx) = mpsc::channel::<DownloadMsg>();
+    {
+        let catalog_items = catalog_items.clone();
+        ui.on_download_dict(move |index| {
+            let index = index as usize;
+            let Some(entry) = download::catalog().get(index) else {
+                return;
+            };
+            // Ignore clicks on rows already installed or in flight.
+            match catalog_items.row_data(index) {
+                Some(mut row) if row.status == 0 => {
+                    row.status = 1;
+                    row.progress = 0.0;
+                    catalog_items.set_row_data(index, row);
+                }
+                _ => return,
+            }
+            let id = entry.id.to_string();
+            let dl_tx = dl_tx.clone();
+            std::thread::spawn(move || {
+                let entry = download::find(&id).expect("id came from the catalog");
+                let mut last_pct = u8::MAX;
+                let result =
+                    download::install(entry, |Progress::Downloading { received, total }| {
+                        if let Some(total) = total.filter(|t| *t > 0) {
+                            let pct = (received * 100 / total) as u8;
+                            if pct != last_pct {
+                                last_pct = pct;
+                                let _ = dl_tx.send(DownloadMsg::Progress {
+                                    index,
+                                    fraction: received as f32 / total as f32,
+                                });
+                            }
+                        }
+                    });
+                let _ = dl_tx.send(match result {
+                    Ok(ifo) => DownloadMsg::Done {
+                        index,
+                        ifo,
+                        language: entry.language,
+                    },
+                    Err(e) => DownloadMsg::Failed {
+                        index,
+                        error: e.to_string(),
+                    },
+                });
+            });
+        });
+    }
+    let dl_timer = Timer::default();
+    {
+        let ui_weak = ui.as_weak();
+        let manager = manager.clone();
+        let dict_items = dict_items.clone();
+        let scopes = scopes.clone();
+        let catalog_items = catalog_items.clone();
+        let req_tx = req_tx.clone();
+        dl_timer.start(TimerMode::Repeated, Duration::from_millis(100), move || {
+            while let Ok(msg) = dl_rx.try_recv() {
+                match msg {
+                    DownloadMsg::Progress { index, fraction } => {
+                        if let Some(mut row) = catalog_items.row_data(index) {
+                            row.progress = fraction;
+                            catalog_items.set_row_data(index, row);
+                        }
+                    }
+                    DownloadMsg::Done {
+                        index,
+                        ifo,
+                        language,
+                    } => {
+                        let ui = ui_weak.unwrap();
+                        let added = manager.borrow_mut().add(&ifo).map(|d| d.name().to_string());
+                        match added {
+                            Ok(name) => {
+                                manager.borrow_mut().set_language(&name, language);
+                                save_config(&manager);
+                                refresh_lists(&ui, &manager, &dict_items, &scopes);
+                                request_rebuild(&ui, &req_tx);
+                                if let Some(mut row) = catalog_items.row_data(index) {
+                                    row.status = 2;
+                                    row.progress = 1.0;
+                                    catalog_items.set_row_data(index, row);
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "failed to load downloaded dictionary at {}: {e}",
+                                    ifo.display()
+                                );
+                                reset_catalog_row(&catalog_items, index);
+                            }
+                        }
+                    }
+                    DownloadMsg::Failed { index, error } => {
+                        eprintln!("dictionary download failed: {error}");
+                        reset_catalog_row(&catalog_items, index);
+                    }
+                }
+            }
+        });
+    }
+
+    // ---- settings: delete a downloaded dictionary (files + registration) ----
+    {
+        let ui_weak = ui.as_weak();
+        let manager = manager.clone();
+        let dict_items = dict_items.clone();
+        let scopes = scopes.clone();
+        let catalog_items = catalog_items.clone();
+        let req_tx = req_tx.clone();
+        ui.on_delete_dict(move |index| {
+            let index = index as usize;
+            let Some(entry) = download::catalog().get(index) else {
+                return;
+            };
+            let ui = ui_weak.unwrap();
+            // Unregister the installed file, then delete it from disk.
+            if let Some(ifo) = download::installed_ifo(entry.id) {
+                manager.borrow_mut().remove_path(&ifo);
+            }
+            if let Err(e) = download::uninstall(entry.id) {
+                eprintln!("failed to delete {}: {e}", entry.id);
+                return;
+            }
+            save_config(&manager);
+            refresh_lists(&ui, &manager, &dict_items, &scopes);
+            request_rebuild(&ui, &req_tx);
+            reset_catalog_row(&catalog_items, index);
+        });
+    }
+
     // ---- settings: theme mode + accent ----
     {
         let ui_weak = ui.as_weak();
@@ -829,8 +1015,60 @@ pub fn run() -> Result<(), slint::PlatformError> {
     // Stop the timers and ask the worker to exit so the process winds down cleanly.
     drop(resp_timer);
     drop(add_timer);
+    drop(dl_timer);
     let _ = req_tx.send(WorkerReq::Shutdown);
     r
+}
+
+/// A message from a dictionary-download worker thread back to the UI thread.
+/// `index` is the catalog row being downloaded.
+enum DownloadMsg {
+    Progress { index: usize, fraction: f32 },
+    Done {
+        index: usize,
+        ifo: PathBuf,
+        language: Language,
+    },
+    Failed { index: usize, error: String },
+}
+
+/// Build the settings "Download" rows from the built-in catalog, marking the
+/// ones already present on disk as installed.
+fn build_catalog_rows() -> Vec<CatalogRow> {
+    download::catalog()
+        .iter()
+        .map(|e| CatalogRow {
+            label: e.label.into(),
+            detail: format!("~{} · {}", human_size(e.approx_size), e.license).into(),
+            status: if download::is_installed(e.id) { 2 } else { 0 },
+            progress: 0.0,
+        })
+        .collect()
+}
+
+/// Return a catalog row to the "available" state (e.g. after a failed download).
+fn reset_catalog_row(catalog_items: &Rc<VecModel<CatalogRow>>, index: usize) {
+    if let Some(mut row) = catalog_items.row_data(index) {
+        row.status = 0;
+        row.progress = 0.0;
+        catalog_items.set_row_data(index, row);
+    }
+}
+
+/// Format a byte count as a short human-readable size (e.g. `98.0 MB`).
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
 }
 
 /// Ask the worker to rebuild the index (the dictionary set changed). The worker
