@@ -48,29 +48,30 @@ cd irondict
 cargo build --release
 ```
 
-The binaries land in `target/release/`: `irondict-gui` and `irondict-cli`.
+The single binary lands at `target/release/irondict`. It serves both front-ends:
+run a subcommand for the CLI, or pass `--gui` to launch the graphical interface.
 
 ## Usage
 
 ### GUI
 
 ```sh
-cargo run --release -p irondict-gui
+cargo run --release -p irondict -- --gui
 ```
 
 ### CLI
 
 ```sh
 # Look up a word across all enabled dictionaries
-irondict-cli lookup serendipity
+irondict lookup serendipity
 
 # Full-text search
-irondict-cli search "light shawl for the neck"
+irondict search "light shawl for the neck"
 
 # Manage dictionaries
-irondict-cli add /path/to/dictionary.ifo
-irondict-cli list
-irondict-cli remove "Dictionary Name"
+irondict add /path/to/dictionary.ifo
+irondict list
+irondict remove "Dictionary Name"
 ```
 
 ## Configuration

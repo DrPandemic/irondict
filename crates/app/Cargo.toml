@@ -1,11 +1,13 @@
 [package]
-name = "irondict-gui"
+name = "irondict"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 irondict-core = { path = "../core" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 regex = "1.12.3"
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 slint = "1"

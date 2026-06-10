@@ -2,19 +2,27 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 use irondict_core::{
     bundled_gcide_path, search, Config, Conjugation, ConjugatorRegistry, DictionaryConfig,
     DictionaryManager, Language, SearchEngine, SearchMode,
 };
 
+mod gui;
+
 /// Multi-dictionary lookup over StarDict dictionaries.
+///
+/// Run a subcommand for the command-line front-end, or pass `--gui` to launch
+/// the graphical interface.
 #[derive(Parser)]
 #[command(name = "irondict", version, about)]
 struct Cli {
+    /// Launch the graphical interface instead of running a command.
+    #[arg(long)]
+    gui: bool,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -109,15 +117,26 @@ impl From<Lang> for Language {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if cli.gui {
+        return gui::run().map_err(|e| anyhow::anyhow!("running GUI: {e}"));
+    }
+
     match cli.command {
-        Command::Lookup { word } => lookup(&word),
-        Command::Conjugate { verb, lang } => conjugate(&verb, lang.map(Into::into)),
-        Command::Search { query, mode, limit } => run_search(&query, mode.into(), limit),
-        Command::Add { path } => add(path),
-        Command::List => list(),
-        Command::Remove { name } => remove(&name),
-        Command::Enable { name } => set_enabled(&name, true),
-        Command::Disable { name } => set_enabled(&name, false),
+        Some(Command::Lookup { word }) => lookup(&word),
+        Some(Command::Conjugate { verb, lang }) => conjugate(&verb, lang.map(Into::into)),
+        Some(Command::Search { query, mode, limit }) => run_search(&query, mode.into(), limit),
+        Some(Command::Add { path }) => add(path),
+        Some(Command::List) => list(),
+        Some(Command::Remove { name }) => remove(&name),
+        Some(Command::Enable { name }) => set_enabled(&name, true),
+        Some(Command::Disable { name }) => set_enabled(&name, false),
+        // No subcommand and no `--gui`: show usage rather than doing nothing.
+        None => {
+            Cli::command().print_help().context("printing help")?;
+            println!();
+            Ok(())
+        }
     }
 }
 

@@ -2708,12 +2708,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "irondict-cli"
+name = "irondict"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "irondict-core",
+ "regex",
+ "rfd",
+ "slint",
+ "slint-build",
+ "zbus",
 ]
 
 [[package]]
@@ -2726,18 +2731,6 @@ dependencies = [
  "tantivy",
  "thiserror 2.0.18",
  "toml 0.8.23",
-]
-
-[[package]]
-name = "irondict-gui"
-version = "0.1.0"
-dependencies = [
- "irondict-core",
- "regex",
- "rfd",
- "slint",
- "slint-build",
- "zbus",
 ]
 
 [[package]]

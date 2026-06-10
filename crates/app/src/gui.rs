@@ -326,7 +326,9 @@ fn warm_up(engine: &SearchEngine) {
     let _ = engine.search("warmup", SearchMode::Fuzzy, 40);
 }
 
-fn main() -> Result<(), slint::PlatformError> {
+/// Launch the graphical front-end and run the Slint event loop until the window
+/// is closed.
+pub fn run() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     // The accent (indigo) and light default live in the .slint; the OS values are
     // detected and applied below, off the startup path.

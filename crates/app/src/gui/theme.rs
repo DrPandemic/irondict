@@ -9,7 +9,7 @@
 
 use slint::{Color, Weak};
 
-use crate::AppWindow;
+use crate::gui::AppWindow;
 
 const INDIGO: (u8, u8, u8) = (0x4f, 0x46, 0xe5);
 

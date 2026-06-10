@@ -54,8 +54,8 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [ pkg-config makeWrapper ];
   buildInputs = runtimeLibs;
 
-  # Build only the front-end binaries; `irondict-core` is pulled in as a dep.
-  cargoBuildFlags = [ "-p" "irondict-gui" "-p" "irondict-cli" ];
+  # Build only the front-end binary; `irondict-core` is pulled in as a dep.
+  cargoBuildFlags = [ "-p" "irondict" ];
   cargoTestFlags = [ "--workspace" ];
 
   postInstall = ''
@@ -69,10 +69,10 @@ rustPlatform.buildRustPackage {
     install -Dm644 packaging/irondict.desktop \
       $out/share/applications/irondict.desktop
 
-    install -Dm644 crates/gui/assets/icons/irondict.svg \
+    install -Dm644 crates/app/assets/icons/irondict.svg \
       $out/share/icons/hicolor/scalable/apps/irondict.svg
     for s in 16 32 48 64 128 256 512; do
-      install -Dm644 crates/gui/assets/icons/hicolor/''${s}x''${s}/apps/irondict.png \
+      install -Dm644 crates/app/assets/icons/hicolor/''${s}x''${s}/apps/irondict.png \
         $out/share/icons/hicolor/''${s}x''${s}/apps/irondict.png
     done
 
@@ -85,7 +85,7 @@ rustPlatform.buildRustPackage {
     # in its vendor JSON) — this makes the GUI self-contained and run on
     # non-NixOS hosts too, with llvmpipe as a software fallback. `--set-default`
     # lets a system driver take over when the env var is already set.
-    wrapProgram $out/bin/irondict-gui \
+    wrapProgram $out/bin/irondict \
       --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs} \
       --set-default __EGL_VENDOR_LIBRARY_DIRS ${mesa}/share/glvnd/egl_vendor.d
   '';
@@ -94,7 +94,7 @@ rustPlatform.buildRustPackage {
     description = "Fast local multi-dictionary lookup with fuzzy and full-text search — CLI and GUI";
     homepage = "https://github.com/DrPandemic/irondict";
     license = lib.licenses.gpl3Plus;
-    mainProgram = "irondict-gui";
+    mainProgram = "irondict";
     platforms = lib.platforms.linux;
   };
 }

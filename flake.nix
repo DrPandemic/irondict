@@ -22,14 +22,11 @@
       apps = forAllSystems (pkgs:
         let irondict = self.packages.${pkgs.system}.irondict; in
         {
-          default = self.apps.${pkgs.system}.gui;
-          gui = {
+          # One binary for both front-ends: `nix run .` for the CLI,
+          # `nix run . -- --gui` for the graphical interface.
+          default = {
             type = "app";
-            program = "${irondict}/bin/irondict-gui";
-          };
-          cli = {
-            type = "app";
-            program = "${irondict}/bin/irondict-cli";
+            program = "${irondict}/bin/irondict";
           };
         });
 

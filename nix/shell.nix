@@ -43,7 +43,7 @@ mkShell {
   ];
   buildInputs = runtimeLibs;
 
-  # `cargo run -p irondict-gui` runs the unwrapped binary, so the renderer's
-  # dlopen'd libs need to be reachable here too.
+  # `cargo run -p irondict -- --gui` runs the unwrapped binary, so the
+  # renderer's dlopen'd libs need to be reachable here too.
   LD_LIBRARY_PATH = lib.makeLibraryPath runtimeLibs;
 }
