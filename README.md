@@ -4,7 +4,7 @@
 
 # IronDict
 
-**Fast local multi-dictionary lookup with fuzzy and full-text search — CLI and GUI.**
+**Fast local multi-dictionary lookup with fuzzy headword search — CLI and GUI.**
 
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 ![Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)
@@ -22,20 +22,24 @@
 
 irondict is a desktop dictionary app written in Rust. It loads
 [StarDict](https://en.wikipedia.org/wiki/StarDict) dictionaries and gives you
-instant fuzzy and full-text search over all of them at once. The same lookup
-engine powers two front-ends — a native GUI and a CLI — so you can search from
-your desktop or your terminal.
+instant fuzzy and prefix search over their headwords across all of them at once.
+The same lookup engine powers two front-ends — a native GUI and a CLI — so you
+can search from your desktop or your terminal.
 
 The public-domain [GCIDE](docs/gcide.md) dictionary is bundled, so it works out
-of the box; add your own StarDict dictionaries to search across them too.
+of the box. Add your own StarDict files, or download monolingual
+[Wiktionary](https://www.wiktionary.org/) dictionaries for several languages
+directly from the app.
 
 ## Features
 
 - **Two front-ends, one engine** — a native [Slint](https://slint.dev) GUI and a
   clap-based CLI share the same core lookup library.
-- **Fuzzy & full-text search** across every enabled dictionary at once.
+- **Fuzzy, prefix & exact headword search** across every enabled dictionary at once.
+- **Downloadable dictionaries** — install monolingual Wiktionary editions for
+  seven languages from a built-in catalog, or add any StarDict file you own.
 - **Clickable cross-references** — follow links between entries in the GUI.
-- **Bundled GCIDE** dictionary; add any StarDict dictionary you own.
+- **Bundled GCIDE** dictionary, so it works out of the box.
 - **System theme aware** (light/dark via the XDG desktop portal).
 
 ## Install
@@ -65,8 +69,13 @@ cargo run --release -p irondict -- --gui
 # Look up a word across all enabled dictionaries
 irondict lookup serendipity
 
-# Full-text search
-irondict search "light shawl for the neck"
+# Search headwords (fuzzy by default)
+irondict search serendipity
+
+# Download dictionaries from the built-in catalog
+irondict catalog            # list what's available
+irondict install fr-fr      # download and install by id
+irondict uninstall fr-fr    # remove it (files + registration)
 
 # Manage dictionaries
 irondict add /path/to/dictionary.ifo
@@ -74,11 +83,20 @@ irondict list
 irondict remove "Dictionary Name"
 ```
 
+In the GUI, the same actions live under **Settings → Downloads** (download,
+install, delete) and **Settings → Dictionaries** (add, enable, remove).
+
 ## Configuration
 
-Dictionaries and preferences are stored in `~/.config/irondict/config.toml`. The
-search index is cached under `~/.cache/irondict/` and rebuilt automatically when
-the dictionary set changes.
+Dictionaries and preferences are stored in `~/.config/irondict/config.toml`, and
+downloaded dictionaries under `~/.local/share/irondict/dictionaries/`. The search
+index is cached under `~/.cache/irondict/` and rebuilt automatically when the
+dictionary set changes.
+
+Downloaded dictionaries are sourced from
+[xxyzz/wiktionary_stardict](https://github.com/xxyzz/wiktionary_stardict) and,
+being derived from Wiktionary, are licensed
+[CC BY-SA](https://creativecommons.org/licenses/by-sa/4.0/).
 
 ## License
 
