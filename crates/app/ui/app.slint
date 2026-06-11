@@ -614,7 +614,10 @@ export component AppWindow inherits Window {
 
         // panel (centered)
         Rectangle {
-            width: min(560px, root.width - 80px);
+            // Which settings panel is shown: 0 Dictionaries, 1 Downloads,
+            // 2 Appearance. Local UI state — not persisted.
+            property <int> active-panel: 0;
+            width: min(720px, root.width - 80px);
             height: min(640px, root.height - 80px);
             background: bg;
             border-radius: 14px;
@@ -625,7 +628,7 @@ export component AppWindow inherits Window {
 
             VerticalLayout {
                 padding: 24px;
-                spacing: 14px;
+                spacing: 16px;
 
                 // header
                 HorizontalLayout {
@@ -653,270 +656,297 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                Text {
-                    text: "DICTIONARIES";
-                    font-size: 11px;
-                    font-weight: 600;
-                    color: accent;
-                }
+                // body: sidebar nav + the active panel's content
+                HorizontalLayout {
+                    spacing: 20px;
 
-                ScrollView {
-                    vertical-stretch: 1;
+                    // sidebar
                     VerticalLayout {
-                        spacing: 8px;
+                        width: 150px;
+                        spacing: 4px;
                         alignment: start;
-                        for d[i] in dict-items: Rectangle {
-                            height: 58px;
+                        for item[ni] in ["Dictionaries", "Downloads", "Appearance"]: Rectangle {
+                            height: 36px;
                             border-radius: 8px;
-                            background: control-bg;
-                            border-width: 1px;
-                            border-color: divider;
+                            background: active-panel == ni
+                                ? divider
+                                : (nav-touch.has-hover ? control-bg : transparent);
                             HorizontalLayout {
                                 padding-left: 12px;
-                                padding-right: 12px;
-                                spacing: 10px;
-                                VerticalLayout {
-                                    horizontal-stretch: 1;
-                                    alignment: center;
+                                Text {
+                                    text: item;
+                                    vertical-alignment: center;
+                                    font-size: 14px;
+                                    font-weight: active-panel == ni ? 600 : 400;
+                                    color: active-panel == ni ? accent : text-primary;
+                                }
+                            }
+                            nav-touch := TouchArea {
+                                clicked => { active-panel = ni; }
+                            }
+                        }
+                    }
+
+                    // ---- Dictionaries panel ----
+                    if active-panel == 0 : VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 12px;
+                        ScrollView {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                for d[i] in dict-items: Rectangle {
+                                    height: 58px;
+                                    border-radius: 8px;
+                                    background: control-bg;
+                                    border-width: 1px;
+                                    border-color: divider;
+                                    HorizontalLayout {
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+                                        spacing: 10px;
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            alignment: center;
+                                            spacing: 2px;
+                                            Text {
+                                                text: d.name;
+                                                font-size: 14px;
+                                                font-weight: 500;
+                                                color: text-primary;
+                                                overflow: elide;
+                                            }
+                                            Text {
+                                                text: d.words + " words";
+                                                font-size: 12px;
+                                                color: text-secondary;
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            ComboBox {
+                                                width: 116px;
+                                                model: ["Auto", "English", "French"];
+                                                current-index: d.language;
+                                                selected => { root.set-dict-language(i, self.current-index); }
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Switch {
+                                                checked: d.enabled;
+                                                toggled => { root.toggle-dict(i); }
+                                            }
+                                        }
+                                        Rectangle {
+                                            width: 28px;
+                                            background: remove-touch.has-hover ? divider : transparent;
+                                            border-radius: 6px;
+                                            remove-touch := TouchArea {
+                                                clicked => { root.remove-dict(i); }
+                                            }
+                                            Text {
+                                                text: "✕";
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                                font-size: 13px;
+                                                color: text-secondary;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            Button {
+                                text: "Add dictionary…";
+                                clicked => { root.add-dict(); }
+                            }
+                        }
+                    }
+
+                    // ---- Downloads panel ----
+                    if active-panel == 1 : VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 12px;
+                        ScrollView {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                for c[i] in catalog-items: Rectangle {
+                                    height: 50px;
+                                    border-radius: 8px;
+                                    background: control-bg;
+                                    border-width: 1px;
+                                    border-color: divider;
+                                    HorizontalLayout {
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+                                        spacing: 10px;
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            alignment: center;
+                                            spacing: 2px;
+                                            Text {
+                                                text: c.label;
+                                                font-size: 14px;
+                                                font-weight: 500;
+                                                color: text-primary;
+                                                overflow: elide;
+                                            }
+                                            Text {
+                                                text: c.status == 1
+                                                    ? "Downloading… " + Math.round(c.progress * 100) + "%"
+                                                    : c.detail;
+                                                font-size: 12px;
+                                                color: text-secondary;
+                                            }
+                                        }
+                                        if c.status == 2: HorizontalLayout {
+                                            spacing: 6px;
+                                            Text {
+                                                text: "✓ Installed";
+                                                font-size: 13px;
+                                                color: text-secondary;
+                                                vertical-alignment: center;
+                                            }
+                                            Rectangle {
+                                                width: 28px;
+                                                border-radius: 6px;
+                                                background: delete-touch.has-hover ? divider : transparent;
+                                                delete-touch := TouchArea {
+                                                    clicked => { root.delete-dict(i); }
+                                                }
+                                                Text {
+                                                    text: "🗑";
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                    font-size: 13px;
+                                                    color: text-secondary;
+                                                }
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            if c.status != 2: Rectangle {
+                                                width: 96px;
+                                                height: 30px;
+                                                border-radius: 6px;
+                                                background: c.status == 1
+                                                    ? divider
+                                                    : (dl-touch.has-hover ? accent : control-bg);
+                                                border-width: 1px;
+                                                border-color: divider;
+                                                Text {
+                                                    text: c.status == 1 ? Math.round(c.progress * 100) + "%" : "Download";
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                    font-size: 13px;
+                                                    color: (dl-touch.has-hover && c.status == 0) ? #ffffff : text-primary;
+                                                }
+                                                dl-touch := TouchArea {
+                                                    enabled: c.status == 0;
+                                                    clicked => { root.download-dict(i); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ---- Appearance panel ----
+                    if active-panel == 2 : VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 16px;
+                        alignment: start;
+
+                        // theme mode segmented control
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Text {
+                                text: "Theme";
+                                vertical-alignment: center;
+                                font-size: 14px;
+                                color: text-primary;
+                                width: 70px;
+                            }
+                            Rectangle {
+                                height: 30px;
+                                width: 240px;
+                                border-radius: 8px;
+                                background: control-bg;
+                                border-width: 1px;
+                                border-color: divider;
+                                HorizontalLayout {
+                                    padding: 3px;
                                     spacing: 2px;
-                                    Text {
-                                        text: d.name;
-                                        font-size: 14px;
-                                        font-weight: 500;
-                                        color: text-primary;
-                                        overflow: elide;
-                                    }
-                                    Text {
-                                        text: d.words + " words";
-                                        font-size: 12px;
-                                        color: text-secondary;
-                                    }
-                                }
-                                VerticalLayout {
-                                    alignment: center;
-                                    ComboBox {
-                                        width: 116px;
-                                        model: ["Auto", "English", "French"];
-                                        current-index: d.language;
-                                        selected => { root.set-dict-language(i, self.current-index); }
+                                    for seg[ti] in ["System", "Light", "Dark"]: Rectangle {
+                                        border-radius: 6px;
+                                        background: theme-mode == ti ? accent : transparent;
+                                        Text {
+                                            text: seg;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            font-size: 13px;
+                                            font-weight: theme-mode == ti ? 600 : 400;
+                                            color: theme-mode == ti ? #ffffff : text-secondary;
+                                        }
+                                        TouchArea {
+                                            clicked => { root.set-theme-mode(ti); }
+                                        }
                                     }
                                 }
-                                VerticalLayout {
-                                    alignment: center;
-                                    Switch {
-                                        checked: d.enabled;
-                                        toggled => { root.toggle-dict(i); }
-                                    }
-                                }
+                            }
+                        }
+
+                        // accent swatches (Auto + presets)
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Text {
+                                text: "Accent";
+                                vertical-alignment: center;
+                                font-size: 14px;
+                                color: text-primary;
+                                width: 70px;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                // "Auto" (follow the OS)
                                 Rectangle {
-                                    width: 28px;
-                                    background: remove-touch.has-hover ? divider : transparent;
-                                    border-radius: 6px;
-                                    remove-touch := TouchArea {
-                                        clicked => { root.remove-dict(i); }
-                                    }
+                                    width: 44px;
+                                    height: 28px;
+                                    border-radius: 8px;
+                                    background: control-bg;
+                                    border-width: accent-choice == 0 ? 2px : 1px;
+                                    border-color: accent-choice == 0 ? accent : divider;
                                     Text {
-                                        text: "✕";
+                                        text: "Auto";
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
-                                        font-size: 13px;
+                                        font-size: 11px;
                                         color: text-secondary;
                                     }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                HorizontalLayout {
-                    alignment: start;
-                    Button {
-                        text: "Add dictionary…";
-                        clicked => { root.add-dict(); }
-                    }
-                }
-
-                Text {
-                    text: "DOWNLOAD";
-                    font-size: 11px;
-                    font-weight: 600;
-                    color: accent;
-                }
-
-                ScrollView {
-                    height: 150px;
-                    VerticalLayout {
-                        spacing: 8px;
-                        alignment: start;
-                        for c[i] in catalog-items: Rectangle {
-                            height: 50px;
-                            border-radius: 8px;
-                            background: control-bg;
-                            border-width: 1px;
-                            border-color: divider;
-                            HorizontalLayout {
-                                padding-left: 12px;
-                                padding-right: 12px;
-                                spacing: 10px;
-                                VerticalLayout {
-                                    horizontal-stretch: 1;
-                                    alignment: center;
-                                    spacing: 2px;
-                                    Text {
-                                        text: c.label;
-                                        font-size: 14px;
-                                        font-weight: 500;
-                                        color: text-primary;
-                                        overflow: elide;
-                                    }
-                                    Text {
-                                        text: c.status == 1
-                                            ? "Downloading… " + Math.round(c.progress * 100) + "%"
-                                            : c.detail;
-                                        font-size: 12px;
-                                        color: text-secondary;
+                                    TouchArea {
+                                        clicked => { root.set-accent(0); }
                                     }
                                 }
-                                if c.status == 2: HorizontalLayout {
-                                    spacing: 6px;
-                                    Text {
-                                        text: "✓ Installed";
-                                        font-size: 13px;
-                                        color: text-secondary;
-                                        vertical-alignment: center;
-                                    }
-                                    Rectangle {
-                                        width: 28px;
-                                        border-radius: 6px;
-                                        background: delete-touch.has-hover ? divider : transparent;
-                                        delete-touch := TouchArea {
-                                            clicked => { root.delete-dict(i); }
-                                        }
-                                        Text {
-                                            text: "🗑";
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                            font-size: 13px;
-                                            color: text-secondary;
-                                        }
+                                for sw[si] in accent-swatches: Rectangle {
+                                    width: 28px;
+                                    height: 28px;
+                                    border-radius: 14px;
+                                    background: sw;
+                                    border-width: accent-choice == si + 1 ? 3px : 0px;
+                                    border-color: text-primary;
+                                    TouchArea {
+                                        clicked => { root.set-accent(si + 1); }
                                     }
                                 }
-                                VerticalLayout {
-                                    alignment: center;
-                                    if c.status != 2: Rectangle {
-                                        width: 96px;
-                                        height: 30px;
-                                        border-radius: 6px;
-                                        background: c.status == 1
-                                            ? divider
-                                            : (dl-touch.has-hover ? accent : control-bg);
-                                        border-width: 1px;
-                                        border-color: divider;
-                                        Text {
-                                            text: c.status == 1 ? Math.round(c.progress * 100) + "%" : "Download";
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                            font-size: 13px;
-                                            color: (dl-touch.has-hover && c.status == 0) ? #ffffff : text-primary;
-                                        }
-                                        dl-touch := TouchArea {
-                                            enabled: c.status == 0;
-                                            clicked => { root.download-dict(i); }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Text {
-                    text: "APPEARANCE";
-                    font-size: 11px;
-                    font-weight: 600;
-                    color: accent;
-                }
-
-                // theme mode segmented control
-                HorizontalLayout {
-                    spacing: 12px;
-                    Text {
-                        text: "Theme";
-                        vertical-alignment: center;
-                        font-size: 14px;
-                        color: text-primary;
-                        width: 70px;
-                    }
-                    Rectangle {
-                        height: 30px;
-                        width: 240px;
-                        border-radius: 8px;
-                        background: control-bg;
-                        border-width: 1px;
-                        border-color: divider;
-                        HorizontalLayout {
-                            padding: 3px;
-                            spacing: 2px;
-                            for seg[ti] in ["System", "Light", "Dark"]: Rectangle {
-                                border-radius: 6px;
-                                background: theme-mode == ti ? accent : transparent;
-                                Text {
-                                    text: seg;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    font-size: 13px;
-                                    font-weight: theme-mode == ti ? 600 : 400;
-                                    color: theme-mode == ti ? #ffffff : text-secondary;
-                                }
-                                TouchArea {
-                                    clicked => { root.set-theme-mode(ti); }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // accent swatches (Auto + presets)
-                HorizontalLayout {
-                    spacing: 12px;
-                    Text {
-                        text: "Accent";
-                        vertical-alignment: center;
-                        font-size: 14px;
-                        color: text-primary;
-                        width: 70px;
-                    }
-                    HorizontalLayout {
-                        spacing: 8px;
-                        alignment: start;
-                        // "Auto" (follow the OS)
-                        Rectangle {
-                            width: 44px;
-                            height: 28px;
-                            border-radius: 8px;
-                            background: control-bg;
-                            border-width: accent-choice == 0 ? 2px : 1px;
-                            border-color: accent-choice == 0 ? accent : divider;
-                            Text {
-                                text: "Auto";
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                                font-size: 11px;
-                                color: text-secondary;
-                            }
-                            TouchArea {
-                                clicked => { root.set-accent(0); }
-                            }
-                        }
-                        for sw[si] in accent-swatches: Rectangle {
-                            width: 28px;
-                            height: 28px;
-                            border-radius: 14px;
-                            background: sw;
-                            border-width: accent-choice == si + 1 ? 3px : 0px;
-                            border-color: text-primary;
-                            TouchArea {
-                                clicked => { root.set-accent(si + 1); }
                             }
                         }
                     }
