@@ -1,14 +1,14 @@
 # Maintainer: DrPandemic <DrPandemic@users.noreply.github.com>
 pkgname=irondict
-pkgver=0.1.0
+pkgver=0.3.0
 pkgrel=1
-pkgdesc="Fast local multi-dictionary lookup with fuzzy and full-text search — CLI and GUI"
+pkgdesc="Fast local multi-dictionary lookup with fuzzy headword search — CLI and GUI"
 arch=('x86_64')
 url="https://github.com/DrPandemic/irondict"
 license=('GPL-3.0-or-later')
 makedepends=('cargo')
 source=("https://github.com/DrPandemic/irondict/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('d4a40de3bad620fe3c07730b3196eed78bb69b170373f3177f30278e3d2798d8')
+sha256sums=('86444df7144f69f8bd1390783e274668efd6f75dfc22428f221b3dd62972fb80')
 
 prepare() {
     cd "$srcdir/$pkgname-$pkgver"
@@ -17,7 +17,7 @@ prepare() {
 
 build() {
     cd "$srcdir/$pkgname-$pkgver"
-    cargo build --release -p irondict-gui -p irondict-cli
+    cargo build --release -p irondict
 }
 
 check() {
@@ -28,17 +28,17 @@ check() {
 package() {
     cd "$srcdir/$pkgname-$pkgver"
 
-    install -Dm755 target/release/irondict-gui "$pkgdir/usr/bin/irondict-gui"
-    install -Dm755 target/release/irondict-cli "$pkgdir/usr/bin/irondict-cli"
+    # Single binary serves both front-ends: subcommands for the CLI, --gui for the GUI.
+    install -Dm755 target/release/irondict "$pkgdir/usr/bin/irondict"
 
     install -Dm644 packaging/irondict.desktop \
         "$pkgdir/usr/share/applications/irondict.desktop"
 
-    install -Dm644 crates/gui/assets/icons/irondict.svg \
+    install -Dm644 crates/app/assets/icons/irondict.svg \
         "$pkgdir/usr/share/icons/hicolor/scalable/apps/irondict.svg"
 
     for s in 16 32 48 64 128 256 512; do
-        install -Dm644 "crates/gui/assets/icons/hicolor/${s}x${s}/apps/irondict.png" \
+        install -Dm644 "crates/app/assets/icons/hicolor/${s}x${s}/apps/irondict.png" \
             "$pkgdir/usr/share/icons/hicolor/${s}x${s}/apps/irondict.png"
     done
 

@@ -2,7 +2,7 @@
 Type=Application
 Name=IronDict
 GenericName=Dictionary
-Comment=Multi-dictionary lookup with fuzzy and full-text search
+Comment=Multi-dictionary lookup with fuzzy headword search
 Exec=irondict --gui
 Icon=irondict
 Terminal=false

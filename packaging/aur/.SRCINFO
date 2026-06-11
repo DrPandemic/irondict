@@ -1,12 +1,12 @@
 pkgbase = irondict
-	pkgdesc = Fast local multi-dictionary lookup with fuzzy and full-text search — CLI and GUI
-	pkgver = 0.1.0
+	pkgdesc = Fast local multi-dictionary lookup with fuzzy headword search — CLI and GUI
+	pkgver = 0.3.0
 	pkgrel = 1
 	url = https://github.com/DrPandemic/irondict
 	arch = x86_64
 	license = GPL-3.0-or-later
 	makedepends = cargo
-	source = https://github.com/DrPandemic/irondict/archive/refs/tags/v0.1.0.tar.gz
-	sha256sums = d4a40de3bad620fe3c07730b3196eed78bb69b170373f3177f30278e3d2798d8
+	source = https://github.com/DrPandemic/irondict/archive/refs/tags/v0.3.0.tar.gz
+	sha256sums = 86444df7144f69f8bd1390783e274668efd6f75dfc22428f221b3dd62972fb80
 
 pkgname = irondict
