@@ -1,3 +1,4 @@
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
@@ -157,14 +158,13 @@ impl SearchEngine {
         // catching a cancellation (and showing first progress) early on small ones.
         let mut seen: u64 = 0;
         manager.for_each_enabled_entry(|name, entry| {
-            if indexing_error.is_some() || cancelled {
-                return;
-            }
             seen += 1;
             if seen % 4096 == 1 {
+                // Stop the moment a newer request supersedes this build, so we
+                // don't keep decoding the remaining (possibly millions of) entries.
                 if cancel() {
                     cancelled = true;
-                    return;
+                    return ControlFlow::Break(());
                 }
                 progress(IndexProgress {
                     indexed: seen,
@@ -191,7 +191,9 @@ impl SearchEngine {
             ));
             if let Err(e) = result {
                 indexing_error = Some(map_err(e));
+                return ControlFlow::Break(());
             }
+            ControlFlow::Continue(())
         })?;
         if let Some(e) = indexing_error {
             return Err(e);

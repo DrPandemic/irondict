@@ -1,3 +1,4 @@
+use std::ops::ControlFlow;
 use std::path::Path;
 
 use stardict::StarDict;
@@ -58,7 +59,14 @@ impl Dictionary {
     ///
     /// Entries are visited in the index's hash order, not sorted. Definitions
     /// that fail to materialize are skipped rather than aborting the whole walk.
-    pub fn for_each_entry(&mut self, mut f: impl FnMut(Entry)) -> Result<(), crate::Error> {
+    /// Call `f` for every entry. `f` returns [`ControlFlow::Break`] to stop early
+    /// (e.g. a cancelled index build) so we don't pay to decode the remaining
+    /// entries — decoding each one decompresses its block, which is the bulk of
+    /// the cost over a large dictionary.
+    pub fn for_each_entry(
+        &mut self,
+        mut f: impl FnMut(Entry) -> ControlFlow<()>,
+    ) -> Result<(), crate::Error> {
         // Borrow the (immutable) index and (mutable) dict store as disjoint
         // fields so we can read every block while filling definitions.
         let ifo = &self.inner.ifo;
@@ -68,7 +76,9 @@ impl Dictionary {
                 .get_definition(idx_entry, ifo)
                 .map_err(|e| crate::Error::Stardict(e.into()))?
             {
-                f(to_entry(word));
+                if f(to_entry(word)).is_break() {
+                    break;
+                }
             }
         }
         Ok(())

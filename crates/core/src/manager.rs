@@ -1,3 +1,4 @@
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use crate::config::{Config, DictionaryConfig, Language, Preferences};
@@ -221,10 +222,24 @@ impl DictionaryManager {
     /// Visit every entry of every enabled dictionary, calling `f` with the
     /// source dictionary's name and the entry. Used to populate the search
     /// index (Phase 5).
-    pub fn for_each_enabled_entry(&mut self, mut f: impl FnMut(&str, Entry)) -> Result<(), Error> {
+    /// Call `f` for every entry of every enabled dictionary. `f` returns
+    /// [`ControlFlow::Break`] to stop early (e.g. a cancelled index build); the
+    /// break halts iteration across dictionaries, not just within the current one.
+    pub fn for_each_enabled_entry(
+        &mut self,
+        mut f: impl FnMut(&str, Entry) -> ControlFlow<()>,
+    ) -> Result<(), Error> {
         for d in self.dicts.iter_mut().filter(|d| d.enabled) {
             let name = d.dictionary.info.name.clone();
-            d.dictionary.for_each_entry(|entry| f(&name, entry))?;
+            let mut stopped = false;
+            d.dictionary.for_each_entry(|entry| {
+                let flow = f(&name, entry);
+                stopped = flow.is_break();
+                flow
+            })?;
+            if stopped {
+                break;
+            }
         }
         Ok(())
     }

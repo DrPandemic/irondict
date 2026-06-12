@@ -154,8 +154,9 @@ enum WorkerReq {
     },
     /// Re-read the manager from the saved config (e.g. a language pin changed);
     /// when `rebuild` is set, also rebuild the search index (dictionary set
-    /// changed).
-    Reload { rebuild: bool },
+    /// changed). `gen` tags that rebuild so the UI can drop index messages from a
+    /// superseded build (only meaningful when `rebuild` is set).
+    Reload { rebuild: bool, gen: u64 },
     /// Stop the worker (on shutdown).
     Shutdown,
 }
@@ -171,12 +172,19 @@ enum WorkerMsg {
         gen: u64,
     },
     /// Periodic progress while the index is (re)building, for the loading bar.
+    /// `gen` tags the build so the UI can drop messages from a superseded one.
     IndexProgress {
+        gen: u64,
         indexed: u64,
         total: u64,
     },
-    IndexReady,
-    BuildError(String),
+    IndexReady {
+        gen: u64,
+    },
+    BuildError {
+        gen: u64,
+        msg: String,
+    },
 }
 
 /// One visited definition page, captured so back/forward can replay it. `scope`
@@ -324,7 +332,18 @@ fn run_worker(req_rx: mpsc::Receiver<WorkerReq>, resp_tx: mpsc::Sender<WorkerMsg
     // A control request pulled off the channel while a build was running, to be
     // handled before blocking for the next one.
     let mut pending: Option<WorkerReq> = None;
-    rebuild_index(&mut engine, &mut manager, &req_rx, &resp_tx, &mut pending);
+    // The generation of the current index build, stamped on every index message so
+    // the UI can drop messages from a build that a newer rebuild has superseded.
+    // The initial build is generation 0.
+    let mut build_gen: u64 = 0;
+    rebuild_index(
+        &mut engine,
+        &mut manager,
+        &req_rx,
+        &resp_tx,
+        &mut pending,
+        build_gen,
+    );
 
     loop {
         // A superseding request captured during a cancelled build takes priority;
@@ -349,11 +368,19 @@ fn run_worker(req_rx: mpsc::Receiver<WorkerReq>, resp_tx: mpsc::Sender<WorkerMsg
                     let _ = resp_tx.send(WorkerMsg::NoEngine { gen });
                 }
             },
-            WorkerReq::Reload { rebuild } => {
+            WorkerReq::Reload { rebuild, gen } => {
                 // Pick up any language pins / dictionary-set changes the UI saved.
                 manager = load_manager();
                 if rebuild {
-                    rebuild_index(&mut engine, &mut manager, &req_rx, &resp_tx, &mut pending);
+                    build_gen = gen;
+                    rebuild_index(
+                        &mut engine,
+                        &mut manager,
+                        &req_rx,
+                        &resp_tx,
+                        &mut pending,
+                        build_gen,
+                    );
                 }
             }
             WorkerReq::Shutdown => break,
@@ -372,6 +399,7 @@ fn rebuild_index(
     req_rx: &mpsc::Receiver<WorkerReq>,
     resp_tx: &mpsc::Sender<WorkerMsg>,
     pending: &mut Option<WorkerReq>,
+    gen: u64,
 ) {
     let cancel = || loop {
         match req_rx.try_recv() {
@@ -391,6 +419,7 @@ fn rebuild_index(
     };
     let progress = |p: IndexProgress| {
         let _ = resp_tx.send(WorkerMsg::IndexProgress {
+            gen,
             indexed: p.indexed,
             total: p.total,
         });
@@ -398,13 +427,13 @@ fn rebuild_index(
     match prepare_engine(manager, cancel, progress) {
         Ok(Some(e)) => {
             *engine = Some(e);
-            let _ = resp_tx.send(WorkerMsg::IndexReady);
+            let _ = resp_tx.send(WorkerMsg::IndexReady { gen });
         }
         // Cancelled: a superseding request is now pending, which will drive the
         // next (correct) rebuild. Keep the previous engine state untouched.
         Ok(None) => {}
         Err(msg) => {
-            let _ = resp_tx.send(WorkerMsg::BuildError(msg));
+            let _ = resp_tx.send(WorkerMsg::BuildError { gen, msg });
         }
     }
 }
@@ -491,6 +520,10 @@ pub fn run() -> Result<(), slint::PlatformError> {
     let (resp_tx, resp_rx) = mpsc::channel::<WorkerMsg>();
     let req_tx = Rc::new(req_tx);
     let gen = Rc::new(Cell::new(0u64));
+    // Generation of the latest requested index build, bumped on every rebuild so
+    // stale index messages from a superseded build can be dropped. Starts at 0 to
+    // match the worker's initial build.
+    let build_gen = Rc::new(Cell::new(0u64));
     std::thread::spawn(move || run_worker(req_rx, resp_tx));
 
     // Drain the worker's responses and apply them to the UI. Polls often enough
@@ -505,6 +538,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let rows = rows.clone();
         let req_tx = req_tx.clone();
         let gen = gen.clone();
+        let build_gen = build_gen.clone();
         // When the current index build began, so the time-remaining estimate can
         // extrapolate from the elapsed time. `None` between builds.
         let mut build_start: Option<Instant> = None;
@@ -537,7 +571,15 @@ pub fn run() -> Result<(), slint::PlatformError> {
                             );
                         }
                     }
-                    WorkerMsg::IndexProgress { indexed, total } => {
+                    WorkerMsg::IndexProgress {
+                        gen: g,
+                        indexed,
+                        total,
+                    } => {
+                        // Drop progress from a build a newer rebuild has superseded.
+                        if g != build_gen.get() {
+                            continue;
+                        }
                         let start = *build_start.get_or_insert_with(Instant::now);
                         let fraction = if total > 0 {
                             (indexed as f32 / total as f32).clamp(0.0, 1.0)
@@ -548,7 +590,12 @@ pub fn run() -> Result<(), slint::PlatformError> {
                         ui.set_index_progress(fraction);
                         ui.set_index_status(index_status(start.elapsed(), fraction).into());
                     }
-                    WorkerMsg::IndexReady => {
+                    WorkerMsg::IndexReady { gen: g } => {
+                        // A stale "ready" must not clear the loading state while a
+                        // newer rebuild is still pending or running.
+                        if g != build_gen.get() {
+                            continue;
+                        }
                         build_start = None;
                         ui.set_indexing(false);
                         ui.set_index_progress(1.0);
@@ -565,7 +612,10 @@ pub fn run() -> Result<(), slint::PlatformError> {
                             });
                         }
                     }
-                    WorkerMsg::BuildError(msg) => {
+                    WorkerMsg::BuildError { gen: g, msg } => {
+                        if g != build_gen.get() {
+                            continue;
+                        }
                         build_start = None;
                         ui.set_indexing(false);
                         apply_page(
@@ -812,6 +862,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let dict_items = dict_items.clone();
         let scopes = scopes.clone();
         let req_tx = req_tx.clone();
+        let build_gen = build_gen.clone();
         ui.on_toggle_dict(move |row| {
             let ui = ui_weak.unwrap();
             let name = nth_dict_name(&manager, row);
@@ -820,7 +871,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 manager.borrow_mut().set_enabled(&name, now);
                 save_config(&manager);
                 refresh_lists(&ui, &manager, &dict_items, &scopes);
-                request_rebuild(&ui, &req_tx);
+                request_rebuild(&ui, &req_tx, &build_gen);
             }
         });
     }
@@ -842,7 +893,10 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 refresh_lists(&ui, &manager, &dict_items, &scopes);
                 // No reindex, but the worker's manager must pick up the new
                 // language pin (it drives conjugation).
-                let _ = req_tx.send(WorkerReq::Reload { rebuild: false });
+                let _ = req_tx.send(WorkerReq::Reload {
+                    rebuild: false,
+                    gen: 0,
+                });
             }
         });
     }
@@ -854,13 +908,14 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let dict_items = dict_items.clone();
         let scopes = scopes.clone();
         let req_tx = req_tx.clone();
+        let build_gen = build_gen.clone();
         ui.on_remove_dict(move |row| {
             let ui = ui_weak.unwrap();
             if let Some(name) = nth_dict_name(&manager, row) {
                 manager.borrow_mut().remove(&name);
                 save_config(&manager);
                 refresh_lists(&ui, &manager, &dict_items, &scopes);
-                request_rebuild(&ui, &req_tx);
+                request_rebuild(&ui, &req_tx, &build_gen);
             }
         });
     }
@@ -890,6 +945,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let dict_items = dict_items.clone();
         let scopes = scopes.clone();
         let req_tx = req_tx.clone();
+        let build_gen = build_gen.clone();
         add_timer.start(TimerMode::Repeated, Duration::from_millis(150), move || {
             let Ok(path) = path_rx.try_recv() else {
                 return;
@@ -900,7 +956,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 Ok(()) => {
                     save_config(&manager);
                     refresh_lists(&ui, &manager, &dict_items, &scopes);
-                    request_rebuild(&ui, &req_tx);
+                    request_rebuild(&ui, &req_tx, &build_gen);
                 }
                 Err(e) => eprintln!("failed to add {}: {}", path.display(), e),
             }
@@ -941,6 +997,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let scopes = scopes.clone();
         let catalog_items = catalog_items.clone();
         let req_tx = req_tx.clone();
+        let build_gen = build_gen.clone();
         let dl_tx = dl_tx.clone();
         dl_timer.start(TimerMode::Repeated, Duration::from_millis(100), move || {
             while let Ok(msg) = dl_rx.try_recv() {
@@ -963,7 +1020,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                                 manager.borrow_mut().set_language(&name, language);
                                 save_config(&manager);
                                 refresh_lists(&ui, &manager, &dict_items, &scopes);
-                                request_rebuild(&ui, &req_tx);
+                                request_rebuild(&ui, &req_tx, &build_gen);
                                 if let Some(index) = index {
                                     if let Some(mut row) = catalog_items.row_data(index) {
                                         row.status = 2;
@@ -1011,6 +1068,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let scopes = scopes.clone();
         let catalog_items = catalog_items.clone();
         let req_tx = req_tx.clone();
+        let build_gen = build_gen.clone();
         ui.on_delete_dict(move |index| {
             let index = index as usize;
             let Some(entry) = download::catalog().get(index) else {
@@ -1037,7 +1095,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             }
             save_config(&manager);
             refresh_lists(&ui, &manager, &dict_items, &scopes);
-            request_rebuild(&ui, &req_tx);
+            request_rebuild(&ui, &req_tx, &build_gen);
             reset_catalog_row(&catalog_items, index);
         });
     }
@@ -1204,7 +1262,11 @@ fn human_duration(secs: f32) -> String {
 /// Ask the worker to rebuild the index (the dictionary set changed). The worker
 /// keeps serving the old index until the new one is ready; `index_ready` flips
 /// back on via the `IndexReady` message.
-fn request_rebuild(ui: &AppWindow, req_tx: &Rc<mpsc::Sender<WorkerReq>>) {
+fn request_rebuild(
+    ui: &AppWindow,
+    req_tx: &Rc<mpsc::Sender<WorkerReq>>,
+    build_gen: &Rc<Cell<u64>>,
+) {
     ui.set_index_ready(false);
     // Show the loading bar immediately, at empty. Every caller changes the
     // dictionary set, so the signature never matches the cached manifest and the
@@ -1215,7 +1277,14 @@ fn request_rebuild(ui: &AppWindow, req_tx: &Rc<mpsc::Sender<WorkerReq>>) {
     ui.set_index_progress(0.0);
     ui.set_index_status("Indexing…".into());
     ui.set_indexing(true);
-    let _ = req_tx.send(WorkerReq::Reload { rebuild: true });
+    // Bump the build generation so any index message still in flight from a
+    // previous build (e.g. its `IndexReady`) is recognised as stale and ignored,
+    // rather than clearing the loading bar we just showed.
+    build_gen.set(build_gen.get() + 1);
+    let _ = req_tx.send(WorkerReq::Reload {
+        rebuild: true,
+        gen: build_gen.get(),
+    });
 }
 
 /// Persist the manager's dictionaries + preferences to the config file.
