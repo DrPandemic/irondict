@@ -1549,26 +1549,58 @@ fn apply_conjugation(ui: &AppWindow, sections: &[RenderedConjSection]) {
         clear_conjugation(ui);
         return;
     }
-    let sections: Vec<ConjSection> = sections
-        .iter()
-        .map(|s| {
-            let forms: Vec<ConjForm> = s
-                .forms
-                .iter()
-                .map(|f| ConjForm {
-                    label: f.label.as_str().into(),
-                    text: f.text.as_str().into(),
-                })
-                .collect();
-            ConjSection {
-                label: s.label.as_str().into(),
-                forms: ModelRc::from(Rc::new(VecModel::from(forms))),
-            }
+    // Group the tense sections into mood tabs, preserving first-appearance order.
+    let mut grouped: Vec<(SharedString, Vec<ConjSection>)> = Vec::new();
+    for s in sections {
+        let group: SharedString = conj_group(&s.label).into();
+        let forms: Vec<ConjForm> = s
+            .forms
+            .iter()
+            .map(|f| ConjForm {
+                label: f.label.as_str().into(),
+                text: f.text.as_str().into(),
+            })
+            .collect();
+        let section = ConjSection {
+            label: s.label.as_str().into(),
+            forms: ModelRc::from(Rc::new(VecModel::from(forms))),
+        };
+        match grouped.iter_mut().find(|(g, _)| *g == group) {
+            Some((_, secs)) => secs.push(section),
+            None => grouped.push((group, vec![section])),
+        }
+    }
+    let moods: Vec<ConjMood> = grouped
+        .into_iter()
+        .map(|(label, secs)| ConjMood {
+            label,
+            sections: ModelRc::from(Rc::new(VecModel::from(secs))),
         })
         .collect();
+    ui.set_conj_tab(0);
     // The table starts hidden; the page only shows a button to open it.
-    ui.set_conjugation(ModelRc::from(Rc::new(VecModel::from(sections))));
+    ui.set_conjugation(ModelRc::from(Rc::new(VecModel::from(moods))));
     ui.set_show_conjugation(false);
+}
+
+/// The mood tab a conjugation section belongs to. French sections group by mood
+/// (`Indicatif présent` → `Indicatif`); anything else (e.g. English "Principal
+/// parts") forms its own tab.
+fn conj_group(label: &str) -> &str {
+    const MOODS: &[&str] = &[
+        "Indicatif",
+        "Subjonctif",
+        "Conditionnel",
+        "Impératif",
+        "Infinitif",
+        "Gérondif",
+        "Participe",
+    ];
+    MOODS
+        .iter()
+        .find(|m| label.starts_with(**m))
+        .copied()
+        .unwrap_or(label)
 }
 
 /// Run a query through the engine and render its first result. Runs on the worker
@@ -1737,9 +1769,8 @@ fn sync_nav_state(ui: &AppWindow, history: &Rc<RefCell<NavHistory>>) {
 }
 
 fn clear_conjugation(ui: &AppWindow) {
-    ui.set_conjugation(ModelRc::from(Rc::new(VecModel::from(
-        Vec::<ConjSection>::new(),
-    ))));
+    ui.set_conjugation(ModelRc::from(Rc::new(VecModel::from(Vec::<ConjMood>::new()))));
+    ui.set_conj_tab(0);
     ui.set_show_conjugation(false);
 }
 

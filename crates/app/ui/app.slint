@@ -57,6 +57,13 @@ struct ConjSection {
     forms: [ConjForm],
 }
 
+// A mood tab grouping its tense sections (French: "Indicatif" → présent,
+// imparfait, …). English collapses to a single mood.
+struct ConjMood {
+    label: string,
+    sections: [ConjSection],
+}
+
 // Read-only text that the user can still select and copy (plain Text can't be
 // selected in Slint).
 component SelectableText inherits TextInput {
@@ -115,7 +122,9 @@ export component AppWindow inherits Window {
 
     // conjugation table (empty = the entry isn't a recognized verb). Shown only
     // on demand, in an overlay, via the button on a verb's page.
-    in property <[ConjSection]> conjugation;
+    in property <[ConjMood]> conjugation;
+    // The selected mood tab; the overlay shows only that mood's tense sections.
+    in-out property <int> conj-tab: 0;
     in-out property <bool> show-conjugation: false;
 
     // ---- settings page ----
@@ -965,7 +974,7 @@ export component AppWindow inherits Window {
 
         // panel (centered)
         Rectangle {
-            width: min(560px, root.width - 80px);
+            width: min(620px, root.width - 80px);
             height: min(640px, root.height - 80px);
             background: bg;
             border-radius: 14px;
@@ -1005,35 +1014,75 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                ScrollView {
+                // body: mood tabs on the left, the active mood's tenses right
+                HorizontalLayout {
+                    spacing: 20px;
                     vertical-stretch: 1;
-                    VerticalLayout {
-                        spacing: 14px;
+
+                    // mood tabs (hidden when there's only one, e.g. English)
+                    if conjugation.length > 1 : VerticalLayout {
+                        width: 140px;
+                        spacing: 4px;
                         alignment: start;
-                        for sec in conjugation: VerticalLayout {
-                            spacing: 4px;
-                            Text {
-                                text: sec.label;
-                                font-size: 12px;
-                                font-weight: 600;
-                                color: accent;
-                            }
-                            for f in sec.forms: HorizontalLayout {
-                                spacing: 8px;
-                                alignment: start;
+                        for mood[ti] in conjugation: Rectangle {
+                            height: 36px;
+                            border-radius: 8px;
+                            background: conj-tab == ti
+                                ? divider
+                                : (mood-touch.has-hover ? control-bg : transparent);
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
                                 Text {
-                                    text: f.label;
-                                    font-size: 13px;
-                                    color: text-secondary;
-                                    width: 150px;
+                                    text: mood.label;
+                                    vertical-alignment: center;
+                                    font-size: 14px;
+                                    font-weight: conj-tab == ti ? 600 : 400;
+                                    color: conj-tab == ti ? accent : text-primary;
                                     overflow: elide;
                                 }
-                                SelectableText {
-                                    text: f.text;
-                                    font-size: 14px;
-                                    font-weight: 500;
-                                    color: text-primary;
-                                    horizontal-stretch: 1;
+                            }
+                            mood-touch := TouchArea {
+                                clicked => {
+                                    conj-tab = ti;
+                                    // start the new mood's tenses from the top
+                                    conj-scroll.viewport-y = 0;
+                                }
+                            }
+                        }
+                    }
+
+                    conj-scroll := ScrollView {
+                        horizontal-stretch: 1;
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 14px;
+                            alignment: start;
+                            for sec in conjugation[conj-tab].sections : VerticalLayout {
+                                spacing: 4px;
+                                Text {
+                                    text: sec.label;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    color: accent;
+                                }
+                                for f in sec.forms: HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: start;
+                                    Text {
+                                        text: f.label;
+                                        font-size: 13px;
+                                        color: text-secondary;
+                                        width: 150px;
+                                        overflow: elide;
+                                    }
+                                    SelectableText {
+                                        text: f.text;
+                                        font-size: 14px;
+                                        font-weight: 500;
+                                        color: text-primary;
+                                        horizontal-stretch: 1;
+                                    }
                                 }
                             }
                         }
