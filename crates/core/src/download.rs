@@ -63,8 +63,9 @@ macro_rules! entry {
 }
 
 /// The built-in catalog of downloadable dictionaries: the monolingual
-/// Wiktionary editions published by xxyzz. Sizes are the compressed download as
-/// of the 2026-06-08 snapshot and are approximate.
+/// Wiktionary editions published by xxyzz, plus the French conjugation
+/// companion. Sizes are the compressed download as of the 2026-06-08 snapshot
+/// and are approximate.
 pub fn catalog() -> &'static [CatalogEntry] {
     use Language::{Auto, English, French};
     &[
@@ -75,8 +76,19 @@ pub fn catalog() -> &'static [CatalogEntry] {
         entry!("ru-ru", "Викисловарь — Русский", Auto, 116_000_000),
         entry!("fi-fi", "Wikisanakirja — Suomi", Auto, 14_000_000),
         entry!("sv-sv", "Wiktionary — Svenska", Auto, 10_000_000),
+        CATALOG_FR_CONJ,
     ]
 }
+
+const CATALOG_FR_CONJ: CatalogEntry = CatalogEntry {
+    id: "fr-conj",
+    label: "Conjugaison — Français",
+    language: Language::French,
+    url: "https://github.com/DrPandemic/wikitionary-verb-dictionaries/releases/latest/download/fr-conj-dictzip.tar.zst",
+    approx_size: 12_000_000,
+    license: LICENSE,
+    source: "Wiktionary via kaikki.org / wiktextract",
+};
 
 /// The catalog entry with the given id, if any.
 pub fn find(id: &str) -> Option<&'static CatalogEntry> {

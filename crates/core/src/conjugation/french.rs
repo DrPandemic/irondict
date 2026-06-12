@@ -16,22 +16,43 @@ use crate::config::Language;
 
 /// French tense/mood headings we recognize, normalized to lowercase without
 /// accents for matching. The display label keeps the proper accented form.
+/// Full mood+tense labels from the conjugation companion come first (24: the
+/// 22 companion labels + the 2 already-here `Indicatif présent` and
+/// `Subjonctif imparfait`), followed by bare fallbacks for non-companion
+/// dictionaries.
 const TENSE_LABELS: &[&str] = &[
     "Indicatif présent",
+    "Indicatif imparfait",
+    "Indicatif passé simple",
+    "Indicatif futur simple",
+    "Indicatif passé composé",
+    "Indicatif plus-que-parfait",
+    "Indicatif passé antérieur",
+    "Indicatif futur antérieur",
+    "Subjonctif présent",
+    "Subjonctif imparfait",
+    "Subjonctif passé",
+    "Subjonctif plus-que-parfait",
+    "Conditionnel présent",
+    "Conditionnel passé",
+    "Impératif présent",
+    "Impératif passé",
+    "Infinitif présent",
+    "Infinitif passé",
+    "Gérondif présent",
+    "Gérondif passé",
+    "Participe présent",
+    "Participe passé",
+    // Bare fallbacks (non-companion dictionaries):
     "Présent",
     "Imparfait",
     "Passé simple",
     "Passé composé",
     "Futur simple",
     "Futur",
-    "Conditionnel présent",
     "Conditionnel",
-    "Subjonctif présent",
-    "Subjonctif imparfait",
     "Subjonctif",
     "Impératif",
-    "Participe présent",
-    "Participe passé",
     "Infinitif",
 ];
 
@@ -63,7 +84,8 @@ impl Conjugator for FrenchConjugator {
     ) -> Option<Conjugation> {
         let base = headword.trim().to_lowercase();
         let definition = definition?;
-        let sections = parse_sections(definition);
+        let text = html_to_lines(definition);
+        let sections = parse_sections(&text);
 
         // Guard against false positives: a real conjugation table has several
         // tenses, each with multiple person forms. `_force` is irrelevant here —
@@ -129,15 +151,18 @@ fn push_section(sections: &mut Vec<ConjSection>, sec: ConjSection) {
 }
 
 /// If `line` begins with a known tense heading, return its display label.
+/// Picks the **longest** matching label to avoid prefix shadowing (e.g.
+/// `Indicatif passé` matching before `Indicatif passé composé`).
 fn match_tense_label(line: &str) -> Option<String> {
     let lower = strip_accents(&line.to_lowercase());
-    for label in TENSE_LABELS {
-        let needle = strip_accents(&label.to_lowercase());
-        if lower.starts_with(&needle) {
-            return Some((*label).to_string());
-        }
-    }
-    None
+    TENSE_LABELS
+        .iter()
+        .filter(|label| {
+            let needle = strip_accents(&label.to_lowercase());
+            lower.starts_with(&needle)
+        })
+        .max_by_key(|label| label.len())
+        .map(|label| (*label).to_string())
 }
 
 /// If `line` contains a subject pronoun + form, return it as a [`ConjForm`].
@@ -159,9 +184,12 @@ fn match_person_form(line: &str) -> Option<ConjForm> {
 }
 
 /// Lowercase ASCII-fold common French accents so headings match regardless of
-/// how the dictionary cased or accented them.
+/// how the dictionary cased or accented them. The input may be in either NFC
+/// (precomposed) or NFD (decomposed) form; combining marks are stripped so
+/// that `e\u{0301}` and `\u{00E9}` both fold to `e`.
 fn strip_accents(s: &str) -> String {
     s.chars()
+        .filter(|c| !matches!(*c, '\u{0300}'..='\u{036F}'))
         .map(|c| match c {
             'à' | 'â' | 'ä' => 'a',
             'é' | 'è' | 'ê' | 'ë' => 'e',
@@ -172,4 +200,54 @@ fn strip_accents(s: &str) -> String {
             other => other,
         })
         .collect()
+}
+
+/// Normalize the conjugation companion's HTML body into the plain,
+/// one-row-per-line text that [`parse_sections`] expects. Plain-text input
+/// (e.g. existing line-structured data) is unaffected.
+fn html_to_lines(input: &str) -> String {
+    if !input.contains('<') {
+        return input.to_string();
+    }
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0;
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+
+    while i < len {
+        if bytes[i] == b'<' {
+            let tag_end = match input[i..].find('>') {
+                Some(pos) => i + pos,
+                None => {
+                    result.push('<');
+                    i += 1;
+                    continue;
+                }
+            };
+            let inner = input[i + 1..tag_end].trim();
+            if inner.eq_ignore_ascii_case("br") || inner.eq_ignore_ascii_case("br/") || inner.eq_ignore_ascii_case("br /") {
+                result.push('\n');
+            }
+            i = tag_end + 1;
+        } else if bytes[i] == b'&' {
+            if input[i..].starts_with("&amp;") {
+                result.push('&');
+                i += 5;
+            } else if input[i..].starts_with("&lt;") {
+                result.push('<');
+                i += 4;
+            } else if input[i..].starts_with("&gt;") {
+                result.push('>');
+                i += 4;
+            } else {
+                result.push('&');
+                i += 1;
+            }
+        } else {
+            let c = input[i..].chars().next().unwrap();
+            result.push(c);
+            i += c.len_utf8();
+        }
+    }
+    result
 }

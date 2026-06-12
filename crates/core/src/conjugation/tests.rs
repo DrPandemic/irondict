@@ -144,6 +144,31 @@ fn french_declines_ordinary_prose() {
     assert!(c.conjugate("parler", Some(prose), true).is_none());
 }
 
+#[test]
+fn french_conj_companion_html_strips_and_parses() {
+    let text = concat!(
+        "<b>Indicatif présent</b><br>je mange<br>tu manges<br>il/elle/on mange<br>",
+        "nous mangeons<br>vous mangez<br>ils/elles mangent<br>",
+        "<b>Indicatif imparfait</b><br>je mangeais<br>tu mangeais<br>il/elle/on mangeait<br>",
+        "nous mangions<br>vous mangiez<br>ils/elles mangeaient<br>",
+    );
+    let c = FrenchConjugator::new();
+    let conj = c
+        .conjugate("manger", Some(text), true)
+        .expect("should parse companion HTML");
+    assert_eq!(conj.language, Language::French);
+    assert!(
+        conj.sections.len() >= 2,
+        "expected at least 2 sections, got {}: {:?}",
+        conj.sections.len(),
+        conj.sections.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+    assert_eq!(conj.sections[0].label, "Indicatif présent");
+    assert_eq!(conj.sections[0].forms.len(), 6);
+    assert_eq!(conj.sections[0].forms[0].text, "mange");
+    assert_eq!(conj.sections[1].label, "Indicatif imparfait");
+}
+
 fn by_label<'a>(forms: &'a [ConjForm], label: &str) -> &'a str {
     forms
         .iter()
