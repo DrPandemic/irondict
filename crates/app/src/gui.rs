@@ -1206,11 +1206,15 @@ fn human_duration(secs: f32) -> String {
 /// back on via the `IndexReady` message.
 fn request_rebuild(ui: &AppWindow, req_tx: &Rc<mpsc::Sender<WorkerReq>>) {
     ui.set_index_ready(false);
-    // Reset the loading bar so it grows from empty; the first `IndexProgress`
-    // flips `indexing` on. (A rebuild that just reopens the cache reports no
-    // progress and finishes instantly, so the bar never appears.)
+    // Show the loading bar immediately, at empty. Every caller changes the
+    // dictionary set, so the signature never matches the cached manifest and the
+    // worker always does a real build — but its first `IndexProgress` only lands
+    // after it has reloaded the manager (re-parsing every dictionary) and started
+    // building. Without flipping `indexing` here the bar wouldn't appear until
+    // then, leaving the stale page on screen with no loading state in between.
     ui.set_index_progress(0.0);
     ui.set_index_status("Indexing…".into());
+    ui.set_indexing(true);
     let _ = req_tx.send(WorkerReq::Reload { rebuild: true });
 }
 
