@@ -132,6 +132,17 @@ pub fn uninstall(id: &str) -> Result<(), Error> {
     }
 }
 
+pub fn companion_for(id: &str) -> Option<&'static str> {
+    match id {
+        "fr-fr" => Some("fr-conj"),
+        _ => None,
+    }
+}
+
+pub fn is_companion(id: &str) -> bool {
+    id == "fr-conj"
+}
+
 fn find_ifo(dir: &Path) -> Option<PathBuf> {
     fs::read_dir(dir)
         .ok()?

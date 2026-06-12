@@ -851,6 +851,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     let (dl_tx, dl_rx) = mpsc::channel::<DownloadMsg>();
     {
         let catalog_items = catalog_items.clone();
+        let dl_tx = dl_tx.clone();
         ui.on_download_dict(move |index| {
             let index = index as usize;
             let Some(entry) = download::catalog().get(index) else {
@@ -865,36 +866,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 }
                 _ => return,
             }
-            let id = entry.id.to_string();
-            let dl_tx = dl_tx.clone();
-            std::thread::spawn(move || {
-                let entry = download::find(&id).expect("id came from the catalog");
-                let mut last_pct = u8::MAX;
-                let result =
-                    download::install(entry, |Progress::Downloading { received, total }| {
-                        if let Some(total) = total.filter(|t| *t > 0) {
-                            let pct = (received * 100 / total) as u8;
-                            if pct != last_pct {
-                                last_pct = pct;
-                                let _ = dl_tx.send(DownloadMsg::Progress {
-                                    index,
-                                    fraction: received as f32 / total as f32,
-                                });
-                            }
-                        }
-                    });
-                let _ = dl_tx.send(match result {
-                    Ok(ifo) => DownloadMsg::Done {
-                        index,
-                        ifo,
-                        language: entry.language,
-                    },
-                    Err(e) => DownloadMsg::Failed {
-                        index,
-                        error: e.to_string(),
-                    },
-                });
-            });
+            spawn_install(Some(index), entry.id.to_string(), dl_tx.clone());
         });
     }
     let dl_timer = Timer::default();
@@ -905,13 +877,14 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let scopes = scopes.clone();
         let catalog_items = catalog_items.clone();
         let req_tx = req_tx.clone();
+        let dl_tx = dl_tx.clone();
         dl_timer.start(TimerMode::Repeated, Duration::from_millis(100), move || {
             while let Ok(msg) = dl_rx.try_recv() {
                 match msg {
                     DownloadMsg::Progress { index, fraction } => {
-                        if let Some(mut row) = catalog_items.row_data(index) {
+                        if let Some(mut row) = index.and_then(|i| catalog_items.row_data(i)) {
                             row.progress = fraction;
-                            catalog_items.set_row_data(index, row);
+                            catalog_items.set_row_data(index.unwrap(), row);
                         }
                     }
                     DownloadMsg::Done {
@@ -927,10 +900,21 @@ pub fn run() -> Result<(), slint::PlatformError> {
                                 save_config(&manager);
                                 refresh_lists(&ui, &manager, &dict_items, &scopes);
                                 request_rebuild(&ui, &req_tx);
-                                if let Some(mut row) = catalog_items.row_data(index) {
-                                    row.status = 2;
-                                    row.progress = 1.0;
-                                    catalog_items.set_row_data(index, row);
+                                if let Some(index) = index {
+                                    if let Some(mut row) = catalog_items.row_data(index) {
+                                        row.status = 2;
+                                        row.progress = 1.0;
+                                        catalog_items.set_row_data(index, row);
+                                    }
+                                    // A primary dictionary may pull in a hidden
+                                    // background companion (e.g. fr-fr → fr-conj).
+                                    if let Some(companion) = download::catalog()
+                                        .get(index)
+                                        .and_then(|e| download::companion_for(e.id))
+                                        .filter(|c| !download::is_installed(c))
+                                    {
+                                        spawn_install(None, companion.to_string(), dl_tx.clone());
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -938,13 +922,17 @@ pub fn run() -> Result<(), slint::PlatformError> {
                                     "failed to load downloaded dictionary at {}: {e}",
                                     ifo.display()
                                 );
-                                reset_catalog_row(&catalog_items, index);
+                                if let Some(index) = index {
+                                    reset_catalog_row(&catalog_items, index);
+                                }
                             }
                         }
                     }
                     DownloadMsg::Failed { index, error } => {
                         eprintln!("dictionary download failed: {error}");
-                        reset_catalog_row(&catalog_items, index);
+                        if let Some(index) = index {
+                            reset_catalog_row(&catalog_items, index);
+                        }
                     }
                 }
             }
@@ -972,6 +960,16 @@ pub fn run() -> Result<(), slint::PlatformError> {
             if let Err(e) = download::uninstall(entry.id) {
                 eprintln!("failed to delete {}: {e}", entry.id);
                 return;
+            }
+            // A primary dictionary's hidden companion is paired with it: remove
+            // it too (e.g. deleting fr-fr also removes fr-conj).
+            if let Some(companion) = download::companion_for(entry.id) {
+                if let Some(ifo) = download::installed_ifo(companion) {
+                    manager.borrow_mut().remove_path(&ifo);
+                }
+                if let Err(e) = download::uninstall(companion) {
+                    eprintln!("failed to delete {companion}: {e}");
+                }
             }
             save_config(&manager);
             refresh_lists(&ui, &manager, &dict_items, &scopes);
@@ -1023,20 +1021,64 @@ pub fn run() -> Result<(), slint::PlatformError> {
 /// A message from a dictionary-download worker thread back to the UI thread.
 /// `index` is the catalog row being downloaded.
 enum DownloadMsg {
-    Progress { index: usize, fraction: f32 },
+    Progress { index: Option<usize>, fraction: f32 },
     Done {
-        index: usize,
+        index: Option<usize>,
         ifo: PathBuf,
         language: Language,
     },
-    Failed { index: usize, error: String },
+    Failed { index: Option<usize>, error: String },
+}
+
+/// Spawn a worker thread that downloads and installs the catalog dictionary
+/// `id`, reporting progress/completion over `dl_tx`. `index` is the settings
+/// catalog row to update, or `None` for a background companion that has no row.
+fn spawn_install(index: Option<usize>, id: String, dl_tx: mpsc::Sender<DownloadMsg>) {
+    std::thread::spawn(move || {
+        let Some(entry) = download::find(&id) else {
+            let _ = dl_tx.send(DownloadMsg::Failed {
+                index,
+                error: format!("unknown dictionary id: {id}"),
+            });
+            return;
+        };
+        let mut last_pct = u8::MAX;
+        let result = download::install(entry, |Progress::Downloading { received, total }| {
+            if let Some(total) = total.filter(|t| *t > 0) {
+                let pct = (received * 100 / total) as u8;
+                if pct != last_pct {
+                    last_pct = pct;
+                    let _ = dl_tx.send(DownloadMsg::Progress {
+                        index,
+                        fraction: received as f32 / total as f32,
+                    });
+                }
+            }
+        });
+        let _ = dl_tx.send(match result {
+            Ok(ifo) => DownloadMsg::Done {
+                index,
+                ifo,
+                language: entry.language,
+            },
+            Err(e) => DownloadMsg::Failed {
+                index,
+                error: e.to_string(),
+            },
+        });
+    });
 }
 
 /// Build the settings "Download" rows from the built-in catalog, marking the
 /// ones already present on disk as installed.
 fn build_catalog_rows() -> Vec<CatalogRow> {
+    // Companions (e.g. fr-conj) are auto-installed alongside their primary, so
+    // they get no row of their own. They are appended last in `catalog()`, so
+    // dropping them keeps the remaining rows index-aligned with `catalog()` —
+    // which the download/delete handlers rely on.
     download::catalog()
         .iter()
+        .filter(|e| !download::is_companion(e.id))
         .map(|e| CatalogRow {
             label: e.label.into(),
             detail: format!("~{} · {}", human_size(e.approx_size), e.license).into(),
@@ -1100,7 +1142,7 @@ fn refresh_lists(
     labels.extend(
         m.dictionaries()
             .iter()
-            .filter(|d| d.enabled)
+            .filter(|d| d.enabled && !is_companion_dict(&d.path))
             .map(|d| pretty_dict_name(d.name()).into()),
     );
     scopes.set_vec(labels);
@@ -1108,6 +1150,7 @@ fn refresh_lists(
     let rows: Vec<DictRow> = m
         .dictionaries()
         .iter()
+        .filter(|d| !is_companion_dict(&d.path))
         .map(|d| DictRow {
             name: pretty_dict_name(d.name()).into(),
             words: group_thousands(d.dictionary.info.word_count).into(),
@@ -1138,7 +1181,7 @@ fn enabled_count(manager: &Rc<RefCell<DictionaryManager>>) -> usize {
         .borrow()
         .dictionaries()
         .iter()
-        .filter(|d| d.enabled)
+        .filter(|d| d.enabled && !is_companion_dict(&d.path))
         .count()
 }
 
@@ -1147,7 +1190,9 @@ fn nth_dict_name(manager: &Rc<RefCell<DictionaryManager>>, row: i32) -> Option<S
     manager
         .borrow()
         .dictionaries()
-        .get(row.max(0) as usize)
+        .iter()
+        .filter(|d| !is_companion_dict(&d.path))
+        .nth(row.max(0) as usize)
         .map(|d| d.name().to_string())
 }
 
@@ -1227,7 +1272,10 @@ fn word_of_the_moment(
     seed: usize,
 ) -> (String, Option<String>) {
     let m = manager.borrow();
-    let mut enabled = m.dictionaries().iter().filter(|d| d.enabled);
+    let mut enabled = m
+        .dictionaries()
+        .iter()
+        .filter(|d| d.enabled && !is_companion_dict(&d.path));
     let dict = if scope <= 0 {
         enabled.next()
     } else {
@@ -1252,7 +1300,7 @@ fn scope_filter(scope: i32, manager: &Rc<RefCell<DictionaryManager>>) -> Option<
         .borrow()
         .dictionaries()
         .iter()
-        .filter(|d| d.enabled)
+        .filter(|d| d.enabled && !is_companion_dict(&d.path))
         .nth(scope as usize - 1)
         .map(|d| d.name().to_string())
 }
@@ -1267,7 +1315,7 @@ fn scope_index_for(manager: &Rc<RefCell<DictionaryManager>>, name: Option<&str>)
         .borrow()
         .dictionaries()
         .iter()
-        .filter(|d| d.enabled)
+        .filter(|d| d.enabled && !is_companion_dict(&d.path))
         .position(|d| d.name() == name)
         .map(|p| p as i32 + 1)
         .unwrap_or(0)
@@ -1281,6 +1329,10 @@ fn pretty_dict_name(name: &str) -> String {
     } else {
         name.to_string()
     }
+}
+
+fn is_companion_dict(path: &std::path::Path) -> bool {
+    path.to_string_lossy().contains("/fr-conj/")
 }
 
 /// A plain-message page (no entry): a "Preparing…" / "No results" / error notice.
@@ -1392,14 +1444,31 @@ fn compute_page(
     }
 }
 
-/// Compute `headword`'s conjugation from its definition and the source
-/// dictionary's pinned language. Empty when the word isn't a recognized verb.
+/// Compute `headword`'s conjugation, sourcing from the companion French
+/// conjugation dictionary when it is installed, falling back to the current
+/// entry's text otherwise.
 fn compute_conjugation(
-    manager: &DictionaryManager,
+    manager: &mut DictionaryManager,
     headword: &str,
     raw: &str,
     source: &str,
 ) -> Vec<RenderedConjSection> {
+    let companion_text = if let Ok(results) = manager.lookup(headword) {
+        results
+            .into_iter()
+            .find(|r| r.dictionary == "Conjugaison — Français")
+            .map(|r| {
+                r.entries
+                    .iter()
+                    .flat_map(|e| e.segments.iter())
+                    .map(|s| s.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+    } else {
+        None
+    };
+
     let language = manager
         .dictionaries()
         .iter()
@@ -1407,7 +1476,10 @@ fn compute_conjugation(
         .map(|d| d.language)
         .unwrap_or(Language::Auto);
 
-    let def = (!raw.is_empty()).then_some(raw);
+    let def = companion_text
+        .as_deref()
+        .or(if !raw.is_empty() { Some(raw) } else { None });
+
     let Some(conj) = ConjugatorRegistry::new().conjugate(headword, def, language) else {
         return Vec::new();
     };

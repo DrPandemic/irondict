@@ -95,13 +95,18 @@ build fr && verbdict package fr`).
     needle instead of the first — removes prefix shadowing entirely. Guard with a
     test so existing dictionaries still parse.
 
-### 4. GUI: source conjugation across all dictionaries (`crates/app/src/gui.rs`)
-- The conjugation must be computed from **any** of the headword's dictionary
-  entries, not only the displayed one (mirror the CLI's `find_map`).
-- In `compute_page`, after `manager.lookup`, iterate every result's entries, run
-  `ConjugatorRegistry::conjugate` per `(entry text, pinned language)`, and take
-  the first match — independent of which entry's body is shown. Keep the visible
-  body (the definition) unchanged; the conjugation panel is separate.
+### 4. GUI: companion-dict integration (`crates/app/src/gui.rs`)
+- **Hide companion from UI**: `fr-conj` is a background-only dictionary — filter
+  it from the scope selector, settings list, and word-of-the-moment via
+  `is_companion_dict(path)`. It stays enabled in the manager so lookups still work.
+- **Auto-download companion**: when `fr-fr` finishes downloading, also kick off a
+  download of `fr-conj` (and vice-versa for uninstall) — the two are a pair.
+- **Source conjugation from companion**: in `compute_conjugation`, look up the
+  headword in the companion dict independently of the displayed entry. The
+  companion's HTML text feeds `FrenchConjugator::conjugate`. Falls back to the
+  displayed entry's text when the companion isn't installed.
+- **Conjugation button**: already wired in `app.slint` — shows when
+  `conjugation.length > 0` and opens the overlay. No new button needed.
 - Verify the panel appears when the on-screen source is the main French
   definition dict (not `fr-conj`).
 
@@ -123,9 +128,9 @@ build fr && verbdict package fr`).
 - README: note the conjugation companion is downloadable.
 
 ## Sequencing
-Tasks 2 + 3 make the **CLI** work (strip + label coverage). Then 1 (catalog) so
-it's installable, then 4 (GUI sourcing) so the panel shows, then 5 (verify).
-Tasks 1 and 3 are small and independent.
+1 (catalog + install dict for live testing) → 2 + 3 (CLI works: strip + labels)
+→ 4 (GUI: hide companion, auto-download, source conjugation) → 5 (verify both)
+→ 6 (docs).
 
 ## Risks
 - The `match_tense_label` longest-match change could shift parsing for existing

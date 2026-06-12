@@ -39,6 +39,9 @@ directly from the app.
 - **Downloadable dictionaries** — install monolingual Wiktionary editions for
   seven languages from a built-in catalog, or add any StarDict file you own.
 - **Clickable cross-references** — follow links between entries in the GUI.
+- **French verb conjugation** — full conjugation tables in both front-ends
+  (CLI `conjugate`, GUI panel). The conjugation data installs automatically
+  alongside the French Wiktionary dictionary.
 - **Bundled GCIDE** dictionary, so it works out of the box.
 - **System theme aware** (light/dark via the XDG desktop portal).
 
@@ -71,6 +74,9 @@ irondict lookup serendipity
 
 # Search headwords (fuzzy by default)
 irondict search serendipity
+
+# Conjugate a French verb (needs the French dictionary installed)
+irondict conjugate manger
 
 # Download dictionaries from the built-in catalog
 irondict catalog            # list what's available
