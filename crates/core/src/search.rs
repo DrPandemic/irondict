@@ -66,6 +66,18 @@ fn schema() -> (Schema, Fields) {
     (builder.build(), fields)
 }
 
+/// Progress reported while [`build_cancellable`](SearchEngine::build_cancellable)
+/// indexes the enabled dictionaries. `indexed` is the number of entries written
+/// so far; `total` is the summed word count of the enabled dictionaries — an
+/// estimate (a dictionary's stated word count can differ slightly from the
+/// entries actually visited), and `0` when unknown, so consumers must guard the
+/// division before computing a fraction.
+#[derive(Debug, Clone, Copy)]
+pub struct IndexProgress {
+    pub indexed: u64,
+    pub total: u64,
+}
+
 /// A search index over the headwords of the enabled dictionaries (definitions
 /// are stored for previews but not searchable). Backed by a tantivy index stored
 /// on disk so it can be cached across runs and only rebuilt when the set of
@@ -91,7 +103,7 @@ impl SearchEngine {
     /// Build (or rebuild) the index in `dir` from the manager's enabled
     /// dictionaries, replacing any existing index there.
     pub fn build(dir: &Path, manager: &mut DictionaryManager) -> Result<Self, Error> {
-        Self::build_cancellable(dir, manager, || false)
+        Self::build_cancellable(dir, manager, || false, |_| {})
             .map(|engine| engine.expect("a build that never cancels always yields an engine"))
     }
 
@@ -99,11 +111,13 @@ impl SearchEngine {
     /// indexing; when it returns `true` the build is abandoned and `Ok(None)` is
     /// returned (no partial index is committed). Used by the GUI so deleting or
     /// changing a dictionary stops an in-flight build instead of finishing a
-    /// now-stale one.
+    /// now-stale one. `progress` is called at the same cadence with the running
+    /// count, so a front-end can show a progress bar / time-remaining estimate.
     pub fn build_cancellable(
         dir: &Path,
         manager: &mut DictionaryManager,
         mut cancel: impl FnMut() -> bool,
+        mut progress: impl FnMut(IndexProgress),
     ) -> Result<Option<Self>, Error> {
         std::fs::create_dir_all(dir)?;
         let (schema, fields) = schema();
@@ -125,21 +139,37 @@ impl SearchEngine {
             }
         };
 
+        // Expected entry count for the progress estimate (the stated word counts
+        // of the enabled dictionaries). Only an estimate, so the UI guards the
+        // division and the actual `seen` total may overshoot slightly.
+        let total: u64 = manager
+            .dictionaries()
+            .iter()
+            .filter(|d| d.enabled)
+            .map(|d| d.dictionary.info.word_count as u64)
+            .sum();
+
         let mut writer = index.writer(50_000_000).map_err(map_err)?;
         let mut indexing_error = None;
         let mut cancelled = false;
-        // Poll `cancel` on the first entry and then once per batch, so the check's
-        // cost stays negligible on large dictionaries while still catching a
-        // cancellation early on small ones.
+        // Poll `cancel` and report `progress` on the first entry and then once per
+        // batch, so the checks stay negligible on large dictionaries while still
+        // catching a cancellation (and showing first progress) early on small ones.
         let mut seen: u64 = 0;
         manager.for_each_enabled_entry(|name, entry| {
             if indexing_error.is_some() || cancelled {
                 return;
             }
             seen += 1;
-            if seen % 4096 == 1 && cancel() {
-                cancelled = true;
-                return;
+            if seen % 4096 == 1 {
+                if cancel() {
+                    cancelled = true;
+                    return;
+                }
+                progress(IndexProgress {
+                    indexed: seen,
+                    total,
+                });
             }
             let definition: String = entry
                 .segments

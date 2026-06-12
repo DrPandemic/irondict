@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 use slint::private_unstable_api::re_exports::{parse_markdown, StyledText};
@@ -18,7 +18,8 @@ use slint::{Color, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use irondict_core::{
     bundled_gcide_path, download, search, Config, ConjugatorRegistry, DictionaryConfig,
-    DictionaryManager, Language, Preferences, Progress, SearchEngine, SearchMode, ThemeMode,
+    DictionaryManager, IndexProgress, Language, Preferences, Progress, SearchEngine, SearchMode,
+    ThemeMode,
 };
 
 /// Preset accent swatches offered in the settings page, in display order. Index
@@ -139,6 +140,11 @@ enum WorkerMsg {
     NoEngine {
         gen: u64,
     },
+    /// Periodic progress while the index is (re)building, for the loading bar.
+    IndexProgress {
+        indexed: u64,
+        total: u64,
+    },
     IndexReady,
     BuildError(String),
 }
@@ -254,6 +260,7 @@ fn index_signature(manager: &DictionaryManager) -> String {
 fn prepare_engine(
     manager: &mut DictionaryManager,
     cancel: impl FnMut() -> bool,
+    progress: impl FnMut(IndexProgress),
 ) -> Result<Option<SearchEngine>, String> {
     let dir = search::default_index_dir().map_err(|e| e.to_string())?;
     let signature = index_signature(manager);
@@ -264,7 +271,9 @@ fn prepare_engine(
             return Ok(Some(engine));
         }
     }
-    match SearchEngine::build_cancellable(&dir, manager, cancel).map_err(|e| e.to_string())? {
+    match SearchEngine::build_cancellable(&dir, manager, cancel, progress)
+        .map_err(|e| e.to_string())?
+    {
         Some(engine) => {
             let _ = std::fs::write(dir.join("manifest"), &signature);
             warm_up(&engine);
@@ -350,7 +359,13 @@ fn rebuild_index(
             }
         }
     };
-    match prepare_engine(manager, cancel) {
+    let progress = |p: IndexProgress| {
+        let _ = resp_tx.send(WorkerMsg::IndexProgress {
+            indexed: p.indexed,
+            total: p.total,
+        });
+    };
+    match prepare_engine(manager, cancel, progress) {
         Ok(Some(e)) => {
             *engine = Some(e);
             let _ = resp_tx.send(WorkerMsg::IndexReady);
@@ -460,6 +475,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let rows = rows.clone();
         let req_tx = req_tx.clone();
         let gen = gen.clone();
+        // When the current index build began, so the time-remaining estimate can
+        // extrapolate from the elapsed time. `None` between builds.
+        let mut build_start: Option<Instant> = None;
         resp_timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
             while let Ok(msg) = resp_rx.try_recv() {
                 let ui = ui_weak.unwrap();
@@ -489,7 +507,21 @@ pub fn run() -> Result<(), slint::PlatformError> {
                             );
                         }
                     }
+                    WorkerMsg::IndexProgress { indexed, total } => {
+                        let start = *build_start.get_or_insert_with(Instant::now);
+                        let fraction = if total > 0 {
+                            (indexed as f32 / total as f32).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        };
+                        ui.set_indexing(true);
+                        ui.set_index_progress(fraction);
+                        ui.set_index_status(index_status(start.elapsed(), fraction).into());
+                    }
                     WorkerMsg::IndexReady => {
+                        build_start = None;
+                        ui.set_indexing(false);
+                        ui.set_index_progress(1.0);
                         ui.set_index_ready(true);
                         // Run whatever the user has already typed against the new index.
                         let q = ui.get_query();
@@ -504,6 +536,8 @@ pub fn run() -> Result<(), slint::PlatformError> {
                         }
                     }
                     WorkerMsg::BuildError(msg) => {
+                        build_start = None;
+                        ui.set_indexing(false);
                         apply_page(
                             &ui,
                             &blocks_model,
@@ -1113,11 +1147,40 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
+/// Build the search-box status line shown while indexing, e.g.
+/// `Indexing… 42% · about 5 s left`. The estimate extrapolates the remaining
+/// fraction from the elapsed time; it's omitted until there's enough signal (a
+/// little progress and a little time) to avoid a wild first guess.
+fn index_status(elapsed: Duration, fraction: f32) -> String {
+    let percent = (fraction * 100.0).round() as u32;
+    if fraction <= 0.02 || elapsed < Duration::from_millis(400) {
+        return format!("Indexing… {percent}%");
+    }
+    let remaining = elapsed.as_secs_f32() * (1.0 - fraction) / fraction;
+    format!("Indexing… {percent}% · about {} left", human_duration(remaining))
+}
+
+/// Render a rough seconds estimate as `5 s` / `1 min 20 s`, kept coarse since
+/// it's only an extrapolation.
+fn human_duration(secs: f32) -> String {
+    let secs = secs.ceil().max(1.0) as u64;
+    if secs < 60 {
+        format!("{secs} s")
+    } else {
+        format!("{} min {} s", secs / 60, secs % 60)
+    }
+}
+
 /// Ask the worker to rebuild the index (the dictionary set changed). The worker
 /// keeps serving the old index until the new one is ready; `index_ready` flips
 /// back on via the `IndexReady` message.
 fn request_rebuild(ui: &AppWindow, req_tx: &Rc<mpsc::Sender<WorkerReq>>) {
     ui.set_index_ready(false);
+    // Reset the loading bar so it grows from empty; the first `IndexProgress`
+    // flips `indexing` on. (A rebuild that just reopens the cache reports no
+    // progress and finishes instantly, so the bar never appears.)
+    ui.set_index_progress(0.0);
+    ui.set_index_status("Indexing…".into());
     let _ = req_tx.send(WorkerReq::Reload { rebuild: true });
 }
 

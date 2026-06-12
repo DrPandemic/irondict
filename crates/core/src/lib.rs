@@ -15,7 +15,7 @@ pub use conjugation::{
 pub use manager::{
     bundled_gcide_path, DictLoadError, DictionaryManager, LookupResult, ManagedDictionary,
 };
-pub use search::{SearchEngine, SearchHit, SearchMode};
+pub use search::{IndexProgress, SearchEngine, SearchHit, SearchMode};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

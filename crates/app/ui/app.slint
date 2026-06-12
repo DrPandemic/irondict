@@ -109,6 +109,9 @@ export component AppWindow inherits Window {
     in-out property <int> selected-index: 0;
     in property <bool> searching: false;
     in property <bool> index-ready: false;
+    in property <bool> indexing: false;             // index build in progress
+    in property <float> index-progress: 0.0;        // 0..1, drives the loading bar
+    in property <string> index-status: "Indexing…"; // placeholder text while indexing
     in property <int> scope: 0;            // 0 = All, 1.. = one per dictionary
     in property <[string]> scopes: ["All"]; // segment labels (driven by Rust)
 
@@ -345,7 +348,7 @@ export component AppWindow inherits Window {
                             x: 0;
                             width: parent.width;
                             visible: root.query == "";
-                            text: root.index-ready ? "Search…" : "Indexing…";
+                            text: root.index-ready ? "Search…" : root.index-status;
                             horizontal-alignment: left;
                             vertical-alignment: center;
                             font-size: 14px;
@@ -400,6 +403,22 @@ export component AppWindow inherits Window {
                 y: parent.height - 1px;
                 height: 1px;
                 background: divider;
+            }
+        }
+
+        // ===================== indexing bar =====================
+        // A thin accent line under the toolbar while the search index is
+        // (re)building, growing left-to-right; the percentage / time remaining
+        // rides along in the search-box placeholder.
+        if root.indexing : Rectangle {
+            height: 3px;
+            background: divider;
+            Rectangle {
+                x: 0;
+                width: parent.width * root.index-progress;
+                height: parent.height;
+                background: accent;
+                animate width { duration: 200ms; easing: ease-out; }
             }
         }
 

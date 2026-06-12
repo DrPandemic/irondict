@@ -99,7 +99,8 @@ fn cancelled_build_yields_no_engine() {
     mgr.add(mini_path()).unwrap();
     let dir = TempDir::new().unwrap();
     // A cancel that fires immediately must abandon the build and commit nothing.
-    let outcome = SearchEngine::build_cancellable(dir.path(), &mut mgr, || true).unwrap();
+    let outcome =
+        SearchEngine::build_cancellable(dir.path(), &mut mgr, || true, |_| {}).unwrap();
     assert!(outcome.is_none());
     // The abandoned index isn't usable; a fresh, uncancelled build still works.
     let engine = SearchEngine::build(dir.path(), &mut mgr).unwrap();
