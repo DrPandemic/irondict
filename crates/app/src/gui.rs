@@ -69,6 +69,36 @@ struct RenderedBlock {
     md: String,
     /// True for an indented example/quotation block (rendered italic + greyed).
     quote: bool,
+    /// True for a section heading (a part of speech like "Verb", or
+    /// "Etymology") — rendered bold and larger, with no marker.
+    heading: bool,
+    /// List nesting depth (0 = top level); drives the body's left indent so
+    /// sub-senses sit under their parent.
+    indent: i32,
+}
+
+/// An intermediate body block, shared by the GCIDE and HTML rendering paths
+/// before the markdown/styled text is built. `text` still carries `LINK_*` and
+/// `EMPH_*` sentinels.
+struct BlockSpec {
+    marker: String,
+    text: String,
+    quote: bool,
+    heading: bool,
+    indent: i32,
+}
+
+impl BlockSpec {
+    /// A plain, markerless body paragraph.
+    fn plain(text: String) -> Self {
+        BlockSpec {
+            marker: String::new(),
+            text,
+            quote: false,
+            heading: false,
+            indent: 0,
+        }
+    }
 }
 
 struct RenderedConjForm {
@@ -1425,24 +1455,37 @@ fn compute_page(
         return message_page(label, headword, "No definition found.");
     }
 
-    // Build the plain-text body blocks (marker + text + quote flag), plus the
-    // header fields. A quote block is an indented GCIDE example/quotation, shown
-    // in lighter italic under the sense it belongs to.
-    let (pron, pos, etym, plain): (String, String, String, Vec<(String, String, bool)>) = if html {
-        // HTML entry: the first paragraph repeats the headword with its phonetic
-        // and part of speech. Lift those onto the grey pron/pos line (as GCIDE
-        // does) and drop the duplicate, then convert the rest to plain-text
-        // paragraphs so tags don't show and the body can be virtualized.
+    // Build the body blocks (marker + text + quote/heading flags + indent), plus
+    // the header fields. A quote block is an indented example/quotation, shown in
+    // lighter italic under the sense it belongs to.
+    let (pron, pos, etym, specs): (String, String, String, Vec<BlockSpec>) = if html {
+        // HTML entry: lift the pronunciation onto the grey line, keep the part of
+        // speech / "Etymology" headings and the nested-list sense numbering, and
+        // convert the rest to plain-text paragraphs so tags don't show and the
+        // body can be virtualized.
         let mut paras = html_to_blocks(&raw);
         let (pron, pos, etym) = extract_html_header(&mut paras, headword);
         let blocks = paras
             .into_iter()
-            .map(|t| {
-                let (marker, body) = split_sense_marker(&t);
-                (marker, body, false)
+            .map(|b| {
+                // Some HTML dictionaries embed the sense marker in the text (a
+                // leading bullet/number) rather than as list structure; lift it
+                // when the list walk didn't already supply one.
+                let (marker, text) = if b.marker.is_empty() && !b.quote && !b.heading {
+                    split_sense_marker(&b.text)
+                } else {
+                    (b.marker, b.text)
+                };
+                BlockSpec {
+                    marker,
+                    text,
+                    quote: b.quote,
+                    heading: b.heading,
+                    indent: b.indent,
+                }
             })
             .collect();
-        // The header fields are shown as plain text, so drop any link sentinels.
+        // The header fields are shown as plain text, so drop any sentinels.
         (
             strip_link_markers(&pron),
             strip_link_markers(&pos),
@@ -1453,7 +1496,7 @@ fn compute_page(
         let parsed = parse_entry(&raw);
         let blocks = if parsed.senses.is_empty() {
             // Fall back to lightly-cleaned text when we couldn't split senses.
-            vec![(String::new(), cleaned_plain(&raw), false)]
+            vec![BlockSpec::plain(cleaned_plain(&raw))]
         } else {
             parsed
                 .senses
@@ -1462,8 +1505,20 @@ fn compute_page(
                 .flat_map(|(i, s)| {
                     // The sense body carries the number; its quotations follow as
                     // markerless italic blocks.
-                    std::iter::once((format!("{}.", i + 1), s.body, false))
-                        .chain(s.quotes.into_iter().map(|q| (String::new(), q, true)))
+                    std::iter::once(BlockSpec {
+                        marker: format!("{}.", i + 1),
+                        text: s.body,
+                        quote: false,
+                        heading: false,
+                        indent: 0,
+                    })
+                    .chain(s.quotes.into_iter().map(|q| BlockSpec {
+                        marker: String::new(),
+                        text: q,
+                        quote: true,
+                        heading: false,
+                        indent: 0,
+                    }))
                 })
                 .collect()
         };
@@ -1472,21 +1527,24 @@ fn compute_page(
 
     // Convert each block's text to markdown with clickable cross-reference links.
     // GCIDE `{word}` braces and HTML `bword://` anchors (carried as `LINK_*`
-    // sentinels) both become `[word](lookup://word)` links; the block's plain
-    // `text` keeps the link label but not the markup.
-    let blocks: Vec<RenderedBlock> = plain
+    // sentinels) both become `[word](lookup://word)` links, and HTML `<b>`/`<i>`
+    // emphasis (carried as `EMPH_*` sentinels) becomes markdown bold/italic; the
+    // block's plain `text` keeps the labels but not the markup.
+    let blocks: Vec<RenderedBlock> = specs
         .into_iter()
-        .map(|(marker, text, quote)| {
+        .map(|b| {
             let (md, text) = if html {
-                (convert_html_refs_to_links(&text), strip_link_markers(&text))
+                (convert_html_refs_to_links(&b.text), strip_link_markers(&b.text))
             } else {
-                (convert_gcide_refs_to_links(&text), text)
+                (convert_gcide_refs_to_links(&b.text), b.text)
             };
             RenderedBlock {
-                marker,
+                marker: b.marker,
                 text,
                 md,
-                quote,
+                quote: b.quote,
+                heading: b.heading,
+                indent: b.indent,
             }
         })
         .collect();
@@ -1578,6 +1636,8 @@ fn apply_page(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, page: &Rend
                 text: body.as_str().into(),
                 styled: Default::default(),
                 quote: false,
+                heading: false,
+                indent: 0,
             }]);
             clear_conjugation(ui);
         }
@@ -1598,6 +1658,8 @@ fn apply_page(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, page: &Rend
                     text: b.text.as_str().into(),
                     styled: parse_markdown::<StyledText>(&b.md, &[]),
                     quote: b.quote,
+                    heading: b.heading,
+                    indent: b.indent,
                 })
                 .collect();
             blocks_model.set_vec(blocks);
@@ -1884,12 +1946,29 @@ fn lookup_raw(
 
 // ---- HTML entry rendering (StarDict type 'h') ----
 
-/// Convert an HTML dictionary entry into plain-text paragraphs: split on
-/// block-level tags, strip the rest, and decode entities. Long paragraphs are
-/// chopped so each ListView delegate stays small (and the body renders at 60fps).
-fn html_to_blocks(html: &str) -> Vec<String> {
+/// One block parsed from an HTML dictionary entry: its hanging sense marker
+/// (derived from list nesting), its text (with `LINK_*`/`EMPH_*` sentinels still
+/// embedded), and flags for usage examples (`quote`) and section headings.
+struct HtmlBlock {
+    marker: String,
+    text: String,
+    quote: bool,
+    heading: bool,
+    /// List nesting depth (0 = top level); drives the body's left indent.
+    indent: i32,
+}
+
+/// Convert an HTML dictionary entry into render-ready blocks: split on
+/// block-level tags, lift list structure into sense markers, keep `<b>`/`<i>`
+/// emphasis and `bword://` links as sentinels, strip the rest, and decode
+/// entities. Long paragraphs are chopped so each ListView delegate stays small
+/// (and the body renders at 60fps).
+// `flush!` clears `link_open` after the final flush, where the value is no longer
+// read — an expected dead store given the macro is reused mid-stream too.
+#[allow(unused_assignments)]
+fn html_to_blocks(html: &str) -> Vec<HtmlBlock> {
     let chars: Vec<char> = html.chars().collect();
-    let mut paras: Vec<String> = Vec::new();
+    let mut out: Vec<HtmlBlock> = Vec::new();
     let mut cur = String::new();
     let mut i = 0;
     // Depth of nested `<font>` elements whose face is a symbol/dingbat: their
@@ -1901,6 +1980,43 @@ fn html_to_blocks(html: &str) -> Vec<String> {
     // (see `LINK_*`) so it survives flattening and can later become a clickable
     // `lookup://` link, while still reading as plain text for snippets.
     let mut link_open = false;
+    // Open list frames: `(ordered, items-so-far)`. Drives the hanging sense
+    // markers ("1.", "a.", "i.", "•") and the body indent, mirroring how
+    // Wiktionary nests its senses in `<ol>`/`<ul>`.
+    let mut lists: Vec<(bool, usize)> = Vec::new();
+    // Marker staged by the most recent `<li>`, hung on its first flushed block.
+    let mut pending_marker = String::new();
+    // Nesting of `<dd>` (usage examples / quotations) and `<h1>`..`<h6>` headings,
+    // so flushed blocks inside them can be flagged.
+    let mut dd_depth = 0usize;
+    let mut heading_depth = 0usize;
+    // Open `<b>`/`<i>` emphasis sentinels and the byte offset where each was
+    // pushed, so an empty `<b></b>` can be dropped instead of emitting bare `**`.
+    let mut emph: Vec<(char, usize)> = Vec::new();
+
+    // Flush the accumulated text as one block, closing any open emphasis/link so
+    // the markdown stays balanced. `indent` is the current list depth.
+    macro_rules! flush {
+        () => {{
+            close_emphasis(&mut cur, &mut emph);
+            if link_open {
+                cur.push(LINK_CLOSE);
+                link_open = false;
+            }
+            let text = collapse_ws(&cur);
+            cur.clear();
+            if !text.is_empty() {
+                out.push(HtmlBlock {
+                    marker: std::mem::take(&mut pending_marker),
+                    text,
+                    quote: dd_depth > 0,
+                    heading: heading_depth > 0,
+                    indent: lists.len().saturating_sub(1) as i32,
+                });
+            }
+        }};
+    }
+
     while i < chars.len() {
         match chars[i] {
             '<' => {
@@ -1911,17 +2027,19 @@ fn html_to_blocks(html: &str) -> Vec<String> {
                 }
                 let tag: String = chars[start..j].iter().collect();
                 let trimmed = tag.trim();
+                let closing = trimmed.starts_with('/');
+                let name = tag_name(trimmed);
                 if trimmed.eq_ignore_ascii_case("/font") {
                     symbol_depth = symbol_depth.saturating_sub(1);
                 } else if symbol_depth > 0 {
                     // Inside a dingbat run: keep `<font>` nesting balanced; drop all else.
-                    if tag_name(trimmed) == "font" {
+                    if name == "font" {
                         symbol_depth += 1;
                     }
-                } else if tag_name(trimmed) == "font" && is_symbol_font(&tag.to_ascii_lowercase()) {
+                } else if name == "font" && is_symbol_font(&tag.to_ascii_lowercase()) {
                     symbol_depth += 1;
-                } else if tag_name(trimmed) == "a" {
-                    if trimmed.starts_with('/') {
+                } else if name == "a" {
+                    if closing {
                         // Closing </a>: end the link text.
                         if link_open {
                             cur.push(LINK_CLOSE);
@@ -1938,12 +2056,45 @@ fn html_to_blocks(html: &str) -> Vec<String> {
                         link_open = true;
                     }
                     // Anchors without a bword href are dropped, keeping their text.
-                } else if is_block_tag(&tag) {
-                    if link_open {
-                        cur.push(LINK_CLOSE);
-                        link_open = false;
+                } else if matches!(name.as_str(), "b" | "strong") {
+                    toggle_emphasis(&mut cur, &mut emph, EMPH_BOLD, closing);
+                } else if matches!(name.as_str(), "i" | "em") {
+                    toggle_emphasis(&mut cur, &mut emph, EMPH_ITAL, closing);
+                } else if name == "ol" || name == "ul" {
+                    flush!();
+                    if closing {
+                        lists.pop();
+                    } else {
+                        lists.push((name == "ol", 0));
                     }
-                    flush_paragraph(&mut cur, &mut paras);
+                } else if name == "li" {
+                    // End the previous item, then stage the new item's marker.
+                    flush!();
+                    if !closing {
+                        let depth = lists.len();
+                        if let Some((ordered, count)) = lists.last_mut() {
+                            *count += 1;
+                            pending_marker = list_marker(*ordered, depth, *count);
+                        }
+                    }
+                } else if name == "dd" || name == "dt" {
+                    if closing {
+                        flush!();
+                        dd_depth = dd_depth.saturating_sub(1);
+                    } else {
+                        dd_depth += 1;
+                        flush!();
+                    }
+                } else if matches!(name.as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
+                    if closing {
+                        flush!();
+                        heading_depth = heading_depth.saturating_sub(1);
+                    } else {
+                        heading_depth += 1;
+                        flush!();
+                    }
+                } else if is_block_tag(&tag) {
+                    flush!();
                 }
                 i = if j < chars.len() { j + 1 } else { j };
             }
@@ -1976,20 +2127,116 @@ fn html_to_blocks(html: &str) -> Vec<String> {
             }
         }
     }
-    if link_open {
-        cur.push(LINK_CLOSE);
-    }
-    flush_paragraph(&mut cur, &mut paras);
+    flush!();
 
-    let mut out = Vec::new();
-    for p in paras {
-        if p.chars().count() > 900 {
-            out.extend(split_long(&p, 800));
+    // Long paragraphs are chopped so each ListView delegate stays small (60fps),
+    // carrying their block's flags onto every piece.
+    let mut split = Vec::new();
+    for b in out {
+        if b.text.chars().count() > 900 {
+            let mut first = true;
+            for piece in split_long(&b.text, 800) {
+                split.push(HtmlBlock {
+                    marker: if first { b.marker.clone() } else { String::new() },
+                    text: piece,
+                    quote: b.quote,
+                    heading: b.heading,
+                    indent: b.indent,
+                });
+                first = false;
+            }
         } else {
-            out.push(p);
+            split.push(b);
         }
     }
-    out
+    split
+}
+
+/// Open or close an emphasis run (`<b>`/`<i>`), tracking its position so an empty
+/// run (`<b></b>`) leaves no stray markdown. On close, only the matching
+/// innermost run is emitted, keeping the sentinel pairs balanced.
+fn toggle_emphasis(cur: &mut String, emph: &mut Vec<(char, usize)>, sentinel: char, closing: bool) {
+    if closing {
+        if matches!(emph.last(), Some((c, _)) if *c == sentinel) {
+            let (ch, pos) = emph.pop().unwrap();
+            emit_or_drop_emphasis(cur, ch, pos);
+        }
+    } else {
+        emph.push((sentinel, cur.len()));
+        cur.push(sentinel);
+    }
+}
+
+/// Close every still-open emphasis run (e.g. at a block boundary).
+fn close_emphasis(cur: &mut String, emph: &mut Vec<(char, usize)>) {
+    while let Some((ch, pos)) = emph.pop() {
+        emit_or_drop_emphasis(cur, ch, pos);
+    }
+}
+
+/// Emit the closing emphasis sentinel, or — when the run wrapped no real text —
+/// remove the opening one by truncating back to `pos`.
+fn emit_or_drop_emphasis(cur: &mut String, ch: char, pos: usize) {
+    let body_is_empty = cur[pos + ch.len_utf8()..]
+        .chars()
+        .all(|c| c.is_whitespace() || is_sentinel(c));
+    if body_is_empty {
+        cur.truncate(pos);
+    } else {
+        cur.push(ch);
+    }
+}
+
+/// The hanging marker for a list item: a bullet for `<ul>`, or a number/letter/
+/// roman numeral cycling by depth for `<ol>` (so nested senses read 1 → a → i).
+fn list_marker(ordered: bool, depth: usize, count: usize) -> String {
+    if !ordered {
+        return "•".to_string();
+    }
+    match (depth - 1) % 3 {
+        0 => format!("{count}."),
+        1 => format!("{}.", to_alpha(count)),
+        _ => format!("{}.", to_roman(count)),
+    }
+}
+
+/// Lower-case letter sequence for an ordinal: 1→a, 26→z, 27→aa, …
+fn to_alpha(n: usize) -> String {
+    let mut n = n;
+    let mut s = String::new();
+    while n > 0 {
+        n -= 1;
+        s.insert(0, (b'a' + (n % 26) as u8) as char);
+        n /= 26;
+    }
+    s
+}
+
+/// Lower-case roman numeral for an ordinal (1→i, 4→iv, …).
+fn to_roman(mut n: usize) -> String {
+    const TABLE: [(usize, &str); 13] = [
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
+    ];
+    let mut s = String::new();
+    for (value, sym) in TABLE {
+        while n >= value {
+            s.push_str(sym);
+            n -= value;
+        }
+    }
+    s
 }
 
 /// Lift the header lines out of an HTML entry's leading paragraphs and drop them
@@ -1998,33 +2245,71 @@ fn html_to_blocks(html: &str) -> Vec<String> {
 /// trails it is the part of speech. A following etymology line (opening with the
 /// "étym." label) is lifted too. Returns `(pron, pos, etym)`; leaves a paragraph
 /// in place when it doesn't look like a header line.
-fn extract_html_header(paras: &mut Vec<String>, headword: &str) -> (String, String, String) {
+fn extract_html_header(paras: &mut Vec<HtmlBlock>, headword: &str) -> (String, String, String) {
+    // Wiktionary lists pronunciations as `IPA: /…/` items scattered through the
+    // entry; lift them onto the grey pron line and drop them from the body.
+    let mut prons: Vec<String> = Vec::new();
+    paras.retain(|b| {
+        if let Some(p) = ipa_pron(&b.text) {
+            if !prons.contains(&p) {
+                prons.push(p);
+            }
+            false
+        } else {
+            true
+        }
+    });
+    let pron_from_ipa = prons.join("  ·  ");
+
+    // Otherwise (e.g. a single-header HTML dictionary) the first non-heading
+    // paragraph repeats the headword with a bracketed phonetic and part of
+    // speech — lift those and drop the duplicate.
     let (mut pron, mut pos) = (String::new(), String::new());
-    if let Some(first) = paras.first() {
-        match (first.find('['), first.find(']')) {
+    if let Some(first) = paras.first().filter(|b| !b.heading && !b.quote) {
+        let text = first.text.clone();
+        match (text.find('['), text.find(']')) {
             (Some(open), Some(close)) if open < close => {
-                pron = first[open + 1..close].trim().to_string();
-                pos = first[close + 1..].trim().to_string();
+                pron = text[open + 1..close].trim().to_string();
+                pos = text[close + 1..].trim().to_string();
                 paras.remove(0);
             }
             // No bracketed phonetic: only drop the line if it's a bare repeat of
             // the headword, otherwise leave the body as-is.
             _ => {
-                if first.trim().eq_ignore_ascii_case(headword.trim()) {
+                if text.trim().eq_ignore_ascii_case(headword.trim()) {
                     paras.remove(0);
                 }
             }
         }
     }
+    if pron.is_empty() {
+        pron = pron_from_ipa;
+    }
 
     // The etymology line, when present, follows the header; lift it as well.
-    let etym = if paras.first().is_some_and(|p| is_etym_line(p)) {
-        paras.remove(0)
+    let etym = if paras.first().is_some_and(|b| !b.heading && is_etym_line(&b.text)) {
+        paras.remove(0).text
     } else {
         String::new()
     };
 
     (pron, pos, etym)
+}
+
+/// Extract the IPA pronunciation from a Wiktionary pronunciation block (`… IPA:
+/// /ɹʌn/`). Returns the slash- or bracket-delimited transcription, or `None` when
+/// the block isn't a pronunciation line.
+fn ipa_pron(text: &str) -> Option<String> {
+    if !text.contains("IPA") {
+        return None;
+    }
+    let between = |open: char, close: char| {
+        let start = text.find(open)? + open.len_utf8();
+        let end = text[start..].find(close)? + start;
+        let inner = text[start..end].trim();
+        (!inner.is_empty()).then(|| inner.to_string())
+    };
+    between('/', '/').or_else(|| between('[', ']'))
 }
 
 /// Whether a paragraph is an etymology line (opens with the "étym." label).
@@ -2074,14 +2359,6 @@ fn split_numeric_marker(s: &str) -> Option<(String, String)> {
     Some((digits, rest.to_string()))
 }
 
-/// Collapse whitespace in `cur`, push it as a paragraph if non-empty, and reset.
-fn flush_paragraph(cur: &mut String, paras: &mut Vec<String>) {
-    let p = collapse_ws(cur);
-    if !p.is_empty() {
-        paras.push(p);
-    }
-    cur.clear();
-}
 
 /// The lowercased element name of an HTML tag body (without `<`/`>`), e.g.
 /// `/DIV style="…"` → `div`.
@@ -2441,7 +2718,12 @@ fn make_snippet(raw: &str) -> String {
         if blocks.len() > 1 {
             blocks.remove(0);
         }
-        strip_link_markers(&blocks.join(" "))
+        let joined = blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        strip_link_markers(&joined)
     } else {
         let flat = collapse_ws(&strip_braces(raw));
         let start = flat.find(" 1. ").map(|i| i + 4).unwrap_or(0);
@@ -2598,6 +2880,20 @@ const LINK_OPEN: char = '\u{E000}';
 const LINK_SEP: char = '\u{E001}';
 const LINK_CLOSE: char = '\u{E002}';
 
+// Emphasis sentinels (also private-use), inserted in pairs around `<b>`/`<i>`
+// runs so the bold/italic survives flattening: they become markdown `**`/`*` for
+// the styled body, and are dropped for plain-text uses.
+const EMPH_BOLD: char = '\u{E003}';
+const EMPH_ITAL: char = '\u{E004}';
+
+/// Whether `c` is one of the private-use sentinels (never present in real text).
+fn is_sentinel(c: char) -> bool {
+    matches!(
+        c,
+        LINK_OPEN | LINK_SEP | LINK_CLOSE | EMPH_BOLD | EMPH_ITAL
+    )
+}
+
 /// Extract the cross-reference target from an `<a …>` tag whose `href` uses the
 /// StarDict `bword://` scheme, percent-decoded. `None` for anchors without such a
 /// href (e.g. `<a name=…>` or external links), which are dropped without linking.
@@ -2645,16 +2941,21 @@ fn percent_decode(s: &str) -> String {
 /// as a markdown `[label](<lookup://target>)` link (`as_markdown`) or as its bare
 /// label (for plain-text uses like snippets). Stray/unbalanced markers are dropped.
 fn render_links(text: &str, as_markdown: bool) -> String {
-    if !text.contains(LINK_OPEN) {
+    if !text.chars().any(is_sentinel) {
         return text.to_string();
     }
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
         if c != LINK_OPEN {
-            // Drop stray separators/closers; copy everything else verbatim.
-            if c != LINK_SEP && c != LINK_CLOSE {
-                out.push(c);
+            match c {
+                // Emphasis: markdown bold/italic, or nothing for plain text.
+                EMPH_BOLD if as_markdown => out.push_str("**"),
+                EMPH_ITAL if as_markdown => out.push('*'),
+                EMPH_BOLD | EMPH_ITAL => {}
+                // Drop stray separators/closers; copy everything else verbatim.
+                LINK_SEP | LINK_CLOSE => {}
+                _ => out.push(c),
             }
             continue;
         }
@@ -2762,10 +3063,12 @@ mod tests {
                     <SPAN style=\"font-style:italic\">italic</span> &laquo; m&acirc;cher &raquo;.</DIV>";
         let blocks = html_to_blocks(html);
         assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0], "headword");
-        assert_eq!(blocks[1], "A sample with colored italic « mâcher ».");
+        assert_eq!(blocks[0].text, "headword");
+        assert_eq!(blocks[1].text, "A sample with colored italic « mâcher ».");
         // no raw tags leak through
-        assert!(blocks.iter().all(|b| !b.contains('<') && !b.contains('>')));
+        assert!(blocks
+            .iter()
+            .all(|b| !b.text.contains('<') && !b.text.contains('>')));
     }
 
     #[test]
@@ -2776,8 +3079,81 @@ mod tests {
                     <P style=\"text-align: center\"><FONT FACE=\"Wingdings\">v</FONT></P> \
                     <DIV>The definition.</DIV>";
         let blocks = html_to_blocks(html);
-        assert_eq!(blocks, vec!["word", "The definition."]);
-        assert!(!blocks.iter().any(|b| b == "v"));
+        let texts: Vec<&str> = blocks.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(texts, vec!["word", "The definition."]);
+        assert!(!texts.iter().any(|t| *t == "v"));
+    }
+
+    #[test]
+    fn wiktionary_nested_senses_get_hierarchical_markers() {
+        // A part-of-speech heading, then a top-level sense with two sub-senses,
+        // one carrying a usage example in a <dd>.
+        let html = "<h4>Verb</h4><ol>\
+            <li>To move swiftly.\
+              <ol>\
+                <li>To run on foot.\
+                  <dl><dd><i>She <b>ran</b> home.</i></dd></dl>\
+                </li>\
+                <li>To flow.</li>\
+              </ol>\
+            </li></ol>";
+        let blocks = html_to_blocks(html);
+        let summary: Vec<(&str, &str, bool, bool, i32)> = blocks
+            .iter()
+            .map(|b| {
+                (
+                    b.marker.as_str(),
+                    b.text.as_str(),
+                    b.quote,
+                    b.heading,
+                    b.indent,
+                )
+            })
+            .collect();
+        // Strip sentinels for the comparison of example text.
+        let example = strip_link_markers(&blocks[3].text);
+        assert_eq!(summary[0], ("", "Verb", false, true, 0));
+        assert_eq!(summary[1], ("1.", "To move swiftly.", false, false, 0));
+        assert_eq!(summary[2].0, "a.");
+        assert_eq!(summary[2].4, 1); // sub-sense is indented one level
+        assert!(summary[3].2); // the example is a quote
+        assert_eq!(summary[3].4, 1); // and hangs under its sub-sense
+        assert_eq!(example, "She ran home.");
+        // The next sibling sub-sense numbers as "b.".
+        assert!(blocks.iter().any(|b| b.marker == "b." && b.text == "To flow."));
+    }
+
+    #[test]
+    fn wiktionary_emphasis_becomes_markdown() {
+        let html = "<p>see <b>bold</b> and <i>italic</i> and <b></b> empty</p>";
+        let blocks = html_to_blocks(html);
+        assert_eq!(blocks.len(), 1);
+        // Bold/italic convert to markdown; the empty <b></b> leaves nothing.
+        assert_eq!(
+            convert_html_refs_to_links(&blocks[0].text),
+            "see **bold** and *italic* and empty"
+        );
+        // Plain text keeps the words without any markup or sentinels; the empty
+        // <b></b> leaves no trace (the surrounding spaces collapse to one).
+        assert_eq!(
+            strip_link_markers(&blocks[0].text),
+            "see bold and italic and empty"
+        );
+    }
+
+    #[test]
+    fn wiktionary_ipa_is_lifted_to_pron_line() {
+        let html = "<h4>Verb</h4>\
+            <ul><li>IPA: /ɹʌn/</li><li>IPA: /ɹʊn/</li></ul>\
+            <ol><li>To move swiftly.</li></ol>";
+        let mut blocks = html_to_blocks(html);
+        let (pron, pos, _etym) = extract_html_header(&mut blocks, "run");
+        assert_eq!(pron, "ɹʌn  ·  ɹʊn");
+        assert_eq!(pos, "");
+        // The pronunciation list is gone; the heading and sense remain.
+        assert!(blocks.iter().all(|b| !b.text.contains("IPA")));
+        assert!(blocks.iter().any(|b| b.heading && b.text == "Verb"));
+        assert!(blocks.iter().any(|b| b.marker == "1."));
     }
 
     #[test]
@@ -2831,7 +3207,7 @@ mod tests {
         let long = "mot ".repeat(400); // ~1600 chars, one paragraph
         let blocks = html_to_blocks(&format!("<p>{long}</p>"));
         assert!(blocks.len() > 1);
-        assert!(blocks.iter().all(|b| b.chars().count() <= 800));
+        assert!(blocks.iter().all(|b| b.text.chars().count() <= 800));
     }
 
     #[test]
@@ -2895,12 +3271,15 @@ mod tests {
         let blocks = html_to_blocks(html);
         assert_eq!(blocks.len(), 1);
         assert_eq!(
-            convert_html_refs_to_links(&blocks[0]),
+            convert_html_refs_to_links(&blocks[0].text),
             "voir [alpha](<lookup://alpha>) et [beta gamma](<lookup://beta gamma>)."
         );
-        assert_eq!(strip_link_markers(&blocks[0]), "voir alpha et beta gamma.");
+        assert_eq!(
+            strip_link_markers(&blocks[0].text),
+            "voir alpha et beta gamma."
+        );
         // No sentinel chars leak into the plain text.
-        let plain = strip_link_markers(&blocks[0]);
+        let plain = strip_link_markers(&blocks[0].text);
         assert!(
             !plain.contains(LINK_OPEN) && !plain.contains(LINK_SEP) && !plain.contains(LINK_CLOSE)
         );
@@ -2912,8 +3291,8 @@ mod tests {
         // text but produce no link.
         let html = "<DIV><a href=\"http://example.com\">site</a> <a name=\"x\">anchor</a></DIV>";
         let blocks = html_to_blocks(html);
-        assert_eq!(blocks[0], "site anchor");
-        assert_eq!(convert_html_refs_to_links(&blocks[0]), "site anchor");
+        assert_eq!(blocks[0].text, "site anchor");
+        assert_eq!(convert_html_refs_to_links(&blocks[0].text), "site anchor");
     }
 
     #[test]

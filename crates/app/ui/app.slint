@@ -42,6 +42,11 @@ struct DefBlock {
     styled: styled-text,
     // True for an indented example/quotation, rendered in lighter italic.
     quote: bool,
+    // True for a section heading (a part of speech, "Etymology"), rendered
+    // bold and larger with no marker.
+    heading: bool,
+    // List nesting depth (0 = top level); indents nested senses.
+    indent: int,
 }
 
 // One conjugated form (e.g. "past" / "went", or "je" / "parle").
@@ -568,10 +573,12 @@ export component AppWindow inherits Window {
                         for b[i] in def-blocks: HorizontalLayout {
                             spacing: 8px;
                             alignment: start;
-                            padding-top: b.quote ? 2px : 4px;
+                            // headings get extra breathing room above the section
+                            padding-top: b.heading ? 14px : (b.quote ? 2px : 4px);
                             padding-bottom: b.quote ? 2px : 4px;
-                            // quotations hang under their sense body
-                            padding-left: b.quote ? 32px : 0px;
+                            // nested senses indent under their parent; quotations
+                            // hang a little further in than their sense body
+                            padding-left: b.indent * 20px + (b.quote ? 24px : 0px);
                             Text {
                                 visible: b.marker != "";
                                 text: b.marker;
@@ -580,7 +587,15 @@ export component AppWindow inherits Window {
                                 color: accent;
                                 width: b.marker != "" ? 24px : 0px;
                             }
-                            if !b.quote : StyledText {
+                            // Section heading (part of speech / "Etymology").
+                            if b.heading : Text {
+                                text: b.text;
+                                font-size: 18px;
+                                font-weight: 700;
+                                color: text-primary;
+                                horizontal-stretch: 1;
+                            }
+                            if !b.quote && !b.heading : StyledText {
                                 text: b.styled;
                                 default-color: text-primary;
                                 link-color: accent;
