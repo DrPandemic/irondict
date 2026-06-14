@@ -84,7 +84,7 @@ const CATALOG_FR_CONJ: CatalogEntry = CatalogEntry {
     id: "fr-conj",
     label: "Conjugaison — Français",
     language: Language::French,
-    url: "https://github.com/DrPandemic/wikitionary-verb-dictionaries/releases/latest/download/fr-conj-dictzip.tar.zst",
+    url: "https://github.com/DrPandemic/wikitionary-dictionaries/releases/latest/download/fr-conj-dictzip.tar.zst",
     approx_size: 12_000_000,
     license: LICENSE,
     source: "Wiktionary via kaikki.org / wiktextract",
