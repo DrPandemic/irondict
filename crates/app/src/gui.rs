@@ -1498,6 +1498,14 @@ fn pretty_dict_name(name: &str) -> String {
         // "Wiktionnaire Français-Français" -> "Wiki Français": the xxyzz releases
         // are monolingual, so collapse the repeated language pair, and abbreviate
         // the long dictionary name to keep the tab short while keeping the language.
+        // "Wiktionary — Italiano" -> "Wiki Italiano": the DrPandemic releases
+        // use an em-dash separator with a single language name.
+        if let Some((_, lang)) = name.split_once(" \u{2014} ") {
+            return format!("Wiki {lang}");
+        }
+        // "Wiktionnaire Français-Français" -> "Wiki Français": the xxyzz releases
+        // are monolingual, so collapse the repeated language pair, and abbreviate
+        // the long dictionary name to keep the tab short while keeping the language.
         if let Some((_, pair)) = name.rsplit_once(' ') {
             if let Some((a, b)) = pair.split_once('-') {
                 if a.eq_ignore_ascii_case(b) {
@@ -3257,10 +3265,12 @@ mod tests {
         let html = "<p>see <b>bold</b> and <i>italic</i> and <b></b> empty</p>";
         let blocks = html_to_blocks(html);
         assert_eq!(blocks.len(), 1);
-        // Bold/italic convert to markdown; the empty <b></b> leaves nothing.
+        // Bold is dropped to plain text (matching GCIDE — Wiktionary bolds the
+        // headword and every inflected form, which reads as noise); only italic
+        // converts to markdown, and the empty <b></b> leaves nothing.
         assert_eq!(
             convert_html_refs_to_links(&blocks[0].text),
-            "see **bold** and *italic* and empty"
+            "see bold and *italic* and empty"
         );
         // Plain text keeps the words without any markup or sentinels; the empty
         // <b></b> leaves no trace (the surrounding spaces collapse to one).
@@ -3436,5 +3446,60 @@ mod tests {
         );
         assert_eq!(bword_target("a href=\"http://x\""), None);
         assert_eq!(bword_target("a name=\"y\""), None);
+    }
+
+    // The HTML contract produced by the `wikitionary-dictionaries` generator for
+    // the Italian (`it-it`) monolingual dictionary. These strings are the actual
+    // shape the generator emits (a `<h4>` POS heading, a `\…\` headword line,
+    // `<ol><li>` senses with `<dd>` examples, `bword://` inflection links). They
+    // guard that irondict keeps rendering `it-it` like the French Wiktionnaire.
+
+    #[test]
+    fn italian_lemma_lifts_pos_and_ipa() {
+        // A noun lemma: POS heading + backslash phonetic headword line + senses.
+        let html = "<h4>Sostantivo</h4><p>cane \\ˈkaːne\\</p>\
+            <ol><li>animale domestico<dd>quel cane difende il padrone</dd></li>\
+            <li>persona vile</li></ol><p>Etimologia: dal latino canis</p>";
+        let mut blocks = html_to_blocks(html);
+        let (pron, pos, _etym) = extract_html_header(&mut blocks, "cane");
+        assert_eq!(pos, "sostantivo");
+        assert_eq!(pron, "ˈkaːne");
+        // The redundant headword line is gone; senses + etymology remain.
+        assert!(blocks.iter().all(|b| !b.text.contains('\\')));
+        assert!(blocks.iter().any(|b| b.marker == "1." && b.text.starts_with("animale")));
+        assert!(blocks.iter().any(|b| b.quote && b.text.contains("difende il padrone")));
+        assert!(blocks.iter().any(|b| b.text.starts_with("Etimologia:")));
+    }
+
+    #[test]
+    fn italian_multi_pos_keeps_later_headings() {
+        // `bello` = adjective + noun: the first section lifts to the grey line, the
+        // second keeps its `<h4>` heading but drops its redundant headword line.
+        let html = "<h4>Aggettivo</h4><p>bello \\ˈbɛllo\\</p><ol><li>gradevole</li></ol>\
+            <h4>Sostantivo</h4><p>bello \\ˈbɛllo\\</p><ol><li>ciò che è bello</li></ol>";
+        let mut blocks = html_to_blocks(html);
+        let (pron, pos, _etym) = extract_html_header(&mut blocks, "bello");
+        assert_eq!(pos, "aggettivo");
+        assert_eq!(pron, "ˈbɛllo");
+        // The second POS heading survives in the body; no headword line remains.
+        assert!(blocks.iter().any(|b| b.heading && b.text == "Sostantivo"));
+        assert!(blocks.iter().all(|b| !b.text.contains('\\')));
+    }
+
+    #[test]
+    fn italian_form_entry_links_to_lemma() {
+        // An inflected form: no phonetic to lift, and the lemma is a clickable link.
+        let html = "<h4>Voce verbale</h4><ol><li>1ª persona di \
+            <a href=\"bword://correre\">correre</a></li></ol>";
+        let mut blocks = html_to_blocks(html);
+        let (pron, pos, _etym) = extract_html_header(&mut blocks, "corro");
+        assert_eq!(pos, "");
+        assert_eq!(pron, "");
+        assert!(blocks.iter().any(|b| b.heading && b.text == "Voce verbale"));
+        let sense = blocks.iter().find(|b| b.marker == "1.").expect("a numbered sense");
+        assert_eq!(
+            convert_html_refs_to_links(&sense.text),
+            "1ª persona di [correre](<lookup://correre>)"
+        );
     }
 }

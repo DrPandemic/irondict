@@ -76,9 +76,20 @@ pub fn catalog() -> &'static [CatalogEntry] {
         entry!("ru-ru", "Викисловарь — Русский", Auto, 116_000_000),
         entry!("fi-fi", "Wikisanakirja — Suomi", Auto, 14_000_000),
         entry!("sv-sv", "Wiktionary — Svenska", Auto, 10_000_000),
+        CATALOG_IT_IT,
         CATALOG_FR_CONJ,
     ]
 }
+
+const CATALOG_IT_IT: CatalogEntry = CatalogEntry {
+    id: "it-it",
+    label: "Wiktionary — Italiano",
+    language: Language::Auto,
+    url: "https://github.com/DrPandemic/wikitionary-dictionaries/releases/latest/download/it-it-dictzip.tar.zst",
+    approx_size: 5_100_000,
+    license: LICENSE,
+    source: "Wiktionary via kaikki.org / wiktextract",
+};
 
 const CATALOG_FR_CONJ: CatalogEntry = CatalogEntry {
     id: "fr-conj",
