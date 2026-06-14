@@ -1490,11 +1490,23 @@ fn scope_index_for(manager: &Rc<RefCell<DictionaryManager>>, name: Option<&str>)
 /// A friendlier label for a StarDict bookname (e.g. the bundled
 /// `dictd_www.dict.org_gcide` shows up as `GCIDE`).
 fn pretty_dict_name(name: &str) -> String {
-    if name.to_lowercase().contains("gcide") {
-        "GCIDE".to_string()
-    } else {
-        name.to_string()
+    let lower = name.to_lowercase();
+    if lower.contains("gcide") {
+        return "GCIDE".to_string();
     }
+    if lower.contains("wiktionnaire") || lower.contains("wiktionary") {
+        // "Wiktionnaire Français-Français" -> "Wiki Français": the xxyzz releases
+        // are monolingual, so collapse the repeated language pair, and abbreviate
+        // the long dictionary name to keep the tab short while keeping the language.
+        if let Some((_, pair)) = name.rsplit_once(' ') {
+            if let Some((a, b)) = pair.split_once('-') {
+                if a.eq_ignore_ascii_case(b) {
+                    return format!("Wiki {a}");
+                }
+            }
+        }
+    }
+    name.to_string()
 }
 
 fn is_companion_dict(path: &std::path::Path) -> bool {
