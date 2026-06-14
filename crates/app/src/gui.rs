@@ -2130,7 +2130,9 @@ fn html_to_blocks(html: &str) -> Vec<HtmlBlock> {
                     }
                     // Anchors without a bword href are dropped, keeping their text.
                 } else if matches!(name.as_str(), "b" | "strong") {
-                    toggle_emphasis(&mut cur, &mut emph, EMPH_BOLD, closing);
+                    // Drop inline bold: keep the text plain to match GCIDE's
+                    // formatting. Wiktionary bolds the headword and every
+                    // inflected form inside its examples, which renders as noise.
                 } else if matches!(name.as_str(), "i" | "em") {
                     toggle_emphasis(&mut cur, &mut emph, EMPH_ITAL, closing);
                 } else if name == "ol" || name == "ul" {
@@ -2334,23 +2336,54 @@ fn extract_html_header(paras: &mut Vec<HtmlBlock>, headword: &str) -> (String, S
     });
     let pron_from_ipa = prons.join("  ·  ");
 
+    let (mut pron, mut pos) = (String::new(), String::new());
+
+    // French Wiktionary structure: each part-of-speech section is a heading
+    // ("Verbe", "Nom commun") immediately followed by a headword line that
+    // repeats the headword with its `\…\` phonetic and grammatical detail. That
+    // line is redundant and visually noisy, so drop it from every section. The
+    // first section's part of speech and phonetic are lifted onto the grey header
+    // line (pos · pron) to mirror GCIDE, and its heading is dropped along with it.
+    let mut i = 0;
+    let mut lifted = false;
+    while i + 1 < paras.len() {
+        if paras[i].heading && !paras[i + 1].heading && !paras[i + 1].quote {
+            if let Some(p) = slash_pron(&paras[i + 1].text) {
+                if !lifted {
+                    pos = paras[i].text.to_lowercase();
+                    // Drop Wiktionary's "Prononciation ?" placeholder (a real
+                    // phonetic never contains a question mark).
+                    pron = if p.contains('?') { String::new() } else { p };
+                    paras.drain(i..=i + 1);
+                    lifted = true;
+                } else {
+                    paras.remove(i + 1);
+                    i += 1;
+                }
+                continue;
+            }
+        }
+        i += 1;
+    }
+
     // Otherwise (e.g. a single-header HTML dictionary) the first non-heading
     // paragraph repeats the headword with a bracketed phonetic and part of
     // speech — lift those and drop the duplicate.
-    let (mut pron, mut pos) = (String::new(), String::new());
-    if let Some(first) = paras.first().filter(|b| !b.heading && !b.quote) {
-        let text = first.text.clone();
-        match (text.find('['), text.find(']')) {
-            (Some(open), Some(close)) if open < close => {
-                pron = text[open + 1..close].trim().to_string();
-                pos = text[close + 1..].trim().to_string();
-                paras.remove(0);
-            }
-            // No bracketed phonetic: only drop the line if it's a bare repeat of
-            // the headword, otherwise leave the body as-is.
-            _ => {
-                if text.trim().eq_ignore_ascii_case(headword.trim()) {
+    if !lifted {
+        if let Some(first) = paras.first().filter(|b| !b.heading && !b.quote) {
+            let text = first.text.clone();
+            match (text.find('['), text.find(']')) {
+                (Some(open), Some(close)) if open < close => {
+                    pron = text[open + 1..close].trim().to_string();
+                    pos = text[close + 1..].trim().to_string();
                     paras.remove(0);
+                }
+                // No bracketed phonetic: only drop the line if it's a bare repeat
+                // of the headword, otherwise leave the body as-is.
+                _ => {
+                    if text.trim().eq_ignore_ascii_case(headword.trim()) {
+                        paras.remove(0);
+                    }
                 }
             }
         }
@@ -2383,6 +2416,17 @@ fn ipa_pron(text: &str) -> Option<String> {
         (!inner.is_empty()).then(|| inner.to_string())
     };
     between('/', '/').or_else(|| between('[', ']'))
+}
+
+/// Extract the phonetic from a French Wiktionary headword line, which carries its
+/// pronunciation as a backslash-delimited respelling (`avoir \a.vwaʁ\ …`). Returns
+/// the first transcription without the slashes, or `None` when there isn't one.
+fn slash_pron(text: &str) -> Option<String> {
+    let start = text.find('\\')?;
+    let rest = &text[start + 1..];
+    let end = rest.find('\\')?;
+    let inner = rest[..end].trim();
+    (!inner.is_empty()).then(|| inner.to_string())
 }
 
 /// Whether a paragraph is an etymology line (opens with the "étym." label).
