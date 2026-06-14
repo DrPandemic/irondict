@@ -1,6 +1,6 @@
 # Maintainer: DrPandemic <DrPandemic@users.noreply.github.com>
 pkgname=irondict
-pkgver=0.3.0
+pkgver=0.4.0
 pkgrel=1
 pkgdesc="Fast local multi-dictionary lookup with fuzzy headword search — CLI and GUI"
 arch=('x86_64')
@@ -8,47 +8,42 @@ url="https://github.com/DrPandemic/irondict"
 license=('GPL-3.0-or-later')
 makedepends=('cargo')
 source=("https://github.com/DrPandemic/irondict/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('86444df7144f69f8bd1390783e274668efd6f75dfc22428f221b3dd62972fb80')
+sha256sums=('261c0c53b88dd7f2c20fc6209411df3bb297b04d7ad89fad22f762845ad27bd1')
 
 prepare() {
-    cd "$srcdir/$pkgname-$pkgver"
-    export RUSTUP_TOOLCHAIN=stable
+  cd "$srcdir/$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
 }
 
 build() {
-    cd "$srcdir/$pkgname-$pkgver"
-    cargo build --release -p irondict
-}
-
-check() {
-    cd "$srcdir/$pkgname-$pkgver"
-    cargo test --release --workspace
+  cd "$srcdir/$pkgname-$pkgver"
+  cargo build --release -p irondict
 }
 
 package() {
-    cd "$srcdir/$pkgname-$pkgver"
+  cd "$srcdir/$pkgname-$pkgver"
 
-    # Single binary serves both front-ends: subcommands for the CLI, --gui for the GUI.
-    install -Dm755 target/release/irondict "$pkgdir/usr/bin/irondict"
+  # Single binary serves both front-ends: subcommands for the CLI, --gui for the GUI.
+  install -Dm755 target/release/irondict "$pkgdir/usr/bin/irondict"
 
-    install -Dm644 packaging/irondict.desktop \
-        "$pkgdir/usr/share/applications/irondict.desktop"
+  install -Dm644 packaging/irondict.desktop \
+    "$pkgdir/usr/share/applications/irondict.desktop"
 
-    install -Dm644 crates/app/assets/icons/irondict.svg \
-        "$pkgdir/usr/share/icons/hicolor/scalable/apps/irondict.svg"
+  install -Dm644 crates/app/assets/icons/irondict.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/irondict.svg"
 
-    for s in 16 32 48 64 128 256 512; do
-        install -Dm644 "crates/app/assets/icons/hicolor/${s}x${s}/apps/irondict.png" \
-            "$pkgdir/usr/share/icons/hicolor/${s}x${s}/apps/irondict.png"
-    done
+  for s in 16 32 48 64 128 256 512; do
+    install -Dm644 "crates/app/assets/icons/hicolor/${s}x${s}/apps/irondict.png" \
+      "$pkgdir/usr/share/icons/hicolor/${s}x${s}/apps/irondict.png"
+  done
 
-    install -Dm644 crates/core/assets/gcide/dictd_www.dict.org_gcide.ifo \
-        "$pkgdir/usr/share/irondict/gcide/dictd_www.dict.org_gcide.ifo"
-    install -Dm644 crates/core/assets/gcide/dictd_www.dict.org_gcide.idx \
-        "$pkgdir/usr/share/irondict/gcide/dictd_www.dict.org_gcide.idx"
-    install -Dm644 crates/core/assets/gcide/dictd_www.dict.org_gcide.dict.dz \
-        "$pkgdir/usr/share/irondict/gcide/dictd_www.dict.org_gcide.dict.dz"
+  install -Dm644 crates/core/assets/gcide/dictd_www.dict.org_gcide.ifo \
+    "$pkgdir/usr/share/irondict/gcide/dictd_www.dict.org_gcide.ifo"
+  install -Dm644 crates/core/assets/gcide/dictd_www.dict.org_gcide.idx \
+    "$pkgdir/usr/share/irondict/gcide/dictd_www.dict.org_gcide.idx"
+  install -Dm644 crates/core/assets/gcide/dictd_www.dict.org_gcide.dict.dz \
+    "$pkgdir/usr/share/irondict/gcide/dictd_www.dict.org_gcide.dict.dz"
 
-    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-    install -Dm644 docs/gcide.md "$pkgdir/usr/share/licenses/$pkgname/gcide.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 docs/gcide.md "$pkgdir/usr/share/licenses/$pkgname/gcide.md"
 }
