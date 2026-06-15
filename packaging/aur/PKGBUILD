@@ -9,8 +9,7 @@ license=('GPL-3.0-or-later')
 makedepends=('cargo')
 optdepends=('albert: launcher integration ("d word" to search the dictionaries)')
 source=("https://github.com/DrPandemic/irondict/archive/refs/tags/v${pkgver}.tar.gz")
-# Replace with the real checksum once the v${pkgver} tag is pushed, e.g. `updpkgsums`.
-sha256sums=('SKIP')
+sha256sums=('c7f9118ad98c24cbdb97bc28eae4f2534aa47adeac09a03eacfdfa19b0bcee9f')
 
 prepare() {
   cd "$srcdir/$pkgname-$pkgver"
