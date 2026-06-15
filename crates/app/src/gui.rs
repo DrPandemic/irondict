@@ -448,7 +448,7 @@ fn warm_up(engine: &SearchEngine) {
 
 /// Launch the graphical front-end and run the Slint event loop until the window
 /// is closed.
-pub fn run() -> Result<(), slint::PlatformError> {
+pub fn run(initial: Option<String>) -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     // The accent (indigo) and light default live in the .slint; the OS values are
     // detected and applied below, off the startup path.
@@ -485,7 +485,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
     }
 
     // Restore the last-used dictionary scope (refresh_lists reset it to "All").
-    {
+    // When opened with a word (e.g. from a launcher), keep "All" so the lookup
+    // spans every dictionary, matching the launcher's all-dictionary search.
+    if initial.is_none() {
         let last = manager.borrow().preferences().last_scope.clone();
         ui.set_scope(scope_index_for(&manager, last.as_deref()));
     }
@@ -501,16 +503,29 @@ pub fn run() -> Result<(), slint::PlatformError> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos() as usize)
         .unwrap_or(0);
-    let (wotm, wotm_src) = word_of_the_moment(&manager, ui.get_scope(), seed);
-    navigate(
-        &ui,
-        &manager,
-        &blocks_model,
-        &history,
-        &wotm,
-        "WORD OF THE MOMENT",
-        wotm_src.as_deref(),
-    );
+    match initial.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+        // Opened with a word (e.g. from a launcher): show its definition straight
+        // away, and seed the search box so the result list fills with that word
+        // selected once the index is ready (the IndexReady handler re-runs the
+        // current query). `navigate` renders without the index, so the definition
+        // is on screen immediately.
+        Some(word) => {
+            ui.set_query(word.into());
+            navigate(&ui, &manager, &blocks_model, &history, word, "", None);
+        }
+        None => {
+            let (wotm, wotm_src) = word_of_the_moment(&manager, ui.get_scope(), seed);
+            navigate(
+                &ui,
+                &manager,
+                &blocks_model,
+                &history,
+                &wotm,
+                "WORD OF THE MOMENT",
+                wotm_src.as_deref(),
+            );
+        }
+    }
 
     // Spin up the search worker. It builds/opens the index and runs every search
     // and first-result render off the UI thread, so typing never blocks. Requests

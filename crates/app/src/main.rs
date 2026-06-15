@@ -21,6 +21,9 @@ struct Cli {
     /// Launch the graphical interface instead of running a command.
     #[arg(long)]
     gui: bool,
+    /// With `--gui`, open straight to this word's definition.
+    #[arg(long, value_name = "WORD")]
+    word: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -131,7 +134,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.gui {
-        return gui::run().map_err(|e| anyhow::anyhow!("running GUI: {e}"));
+        return gui::run(cli.word).map_err(|e| anyhow::anyhow!("running GUI: {e}"));
     }
 
     match cli.command {
