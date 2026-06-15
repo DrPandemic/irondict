@@ -24,6 +24,10 @@ struct Cli {
     /// With `--gui`, open straight to this word's definition.
     #[arg(long, value_name = "WORD")]
     word: Option<String>,
+    /// With `--gui`, restrict the view to this dictionary (its name as shown by
+    /// `list`). Pairs with `--word` to open it scoped to that dictionary.
+    #[arg(long, value_name = "NAME")]
+    dict: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -45,6 +49,9 @@ enum Command {
         /// Maximum number of results to return.
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// Restrict results to this dictionary (its name as shown by `list`).
+        #[arg(long, value_name = "NAME")]
+        dict: Option<String>,
     },
     /// Conjugate a verb, sourcing forms from the loaded dictionaries.
     Conjugate {
@@ -134,13 +141,15 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.gui {
-        return gui::run(cli.word).map_err(|e| anyhow::anyhow!("running GUI: {e}"));
+        return gui::run(cli.word, cli.dict).map_err(|e| anyhow::anyhow!("running GUI: {e}"));
     }
 
     match cli.command {
         Some(Command::Lookup { word }) => lookup(&word),
         Some(Command::Conjugate { verb, lang }) => conjugate(&verb, lang.map(Into::into)),
-        Some(Command::Search { query, mode, limit }) => run_search(&query, mode.into(), limit),
+        Some(Command::Search { query, mode, limit, dict }) => {
+            run_search(&query, mode.into(), limit, dict.as_deref())
+        }
         Some(Command::Add { path }) => add(path),
         Some(Command::Catalog) => catalog(),
         Some(Command::Install { id }) => install(&id),
@@ -265,6 +274,7 @@ fn print_conjugation(c: &Conjugation) {
     let lang = match c.language {
         Language::English => "English",
         Language::French => "French",
+        Language::Italian => "Italian",
         Language::Auto => "",
     };
     println!("{} ({lang})", c.infinitive);
@@ -324,10 +334,12 @@ fn build_or_open_index(manager: &mut DictionaryManager) -> Result<SearchEngine> 
     Ok(engine)
 }
 
-fn run_search(query: &str, mode: SearchMode, limit: usize) -> Result<()> {
+fn run_search(query: &str, mode: SearchMode, limit: usize, dict: Option<&str>) -> Result<()> {
     let mut manager = load_manager()?;
     let engine = build_or_open_index(&mut manager)?;
-    let hits = engine.search(query, mode, limit).context("searching")?;
+    let hits = engine
+        .search_scoped(query, mode, limit, dict)
+        .context("searching")?;
 
     if hits.is_empty() {
         println!("No results for \"{query}\".");
@@ -452,8 +464,9 @@ fn list() -> Result<()> {
     for d in dicts {
         let state = if d.enabled { "enabled" } else { "disabled" };
         println!(
-            "{} [{state}] — {} words ({})",
+            "{} [{state}] [{}] — {} words ({})",
             d.name(),
+            d.language.code(),
             d.dictionary.info.word_count,
             d.path.display()
         );

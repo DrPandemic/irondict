@@ -84,7 +84,7 @@ pub fn catalog() -> &'static [CatalogEntry] {
 const CATALOG_IT_IT: CatalogEntry = CatalogEntry {
     id: "it-it",
     label: "Wiktionary — Italiano",
-    language: Language::Auto,
+    language: Language::Italian,
     url: "https://github.com/DrPandemic/wikitionary-dictionaries/releases/latest/download/it-it-dictzip.tar.zst",
     approx_size: 5_100_000,
     license: LICENSE,

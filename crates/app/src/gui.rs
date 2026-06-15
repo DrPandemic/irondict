@@ -448,7 +448,7 @@ fn warm_up(engine: &SearchEngine) {
 
 /// Launch the graphical front-end and run the Slint event loop until the window
 /// is closed.
-pub fn run(initial: Option<String>) -> Result<(), slint::PlatformError> {
+pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     // The accent (indigo) and light default live in the .slint; the OS values are
     // detected and applied below, off the startup path.
@@ -484,12 +484,20 @@ pub fn run(initial: Option<String>) -> Result<(), slint::PlatformError> {
         ui.set_accent_choice(accent_choice_index(&prefs));
     }
 
-    // Restore the last-used dictionary scope (refresh_lists reset it to "All").
-    // When opened with a word (e.g. from a launcher), keep "All" so the lookup
-    // spans every dictionary, matching the launcher's all-dictionary search.
-    if initial.is_none() {
-        let last = manager.borrow().preferences().last_scope.clone();
-        ui.set_scope(scope_index_for(&manager, last.as_deref()));
+    // Pick the active dictionary scope (refresh_lists reset it to "All").
+    match scope.as_deref() {
+        // Launched scoped to one dictionary (e.g. a per-language launcher trigger):
+        // select it so both the lookup and the result list stay within that dict.
+        // Falls back to "All" if the name no longer matches an enabled dictionary.
+        Some(name) => ui.set_scope(scope_index_for(&manager, Some(name))),
+        // Opened with a word but no scope (the all-dictionaries launcher trigger):
+        // keep "All" so the lookup spans every dictionary.
+        None if initial.is_some() => {}
+        // Normal launch: restore the last-used scope.
+        None => {
+            let last = manager.borrow().preferences().last_scope.clone();
+            ui.set_scope(scope_index_for(&manager, last.as_deref()));
+        }
     }
 
     // Apply the theme (persisted override, else OS detection) without blocking
@@ -511,7 +519,11 @@ pub fn run(initial: Option<String>) -> Result<(), slint::PlatformError> {
         // is on screen immediately.
         Some(word) => {
             ui.set_query(word.into());
-            navigate(&ui, &manager, &blocks_model, &history, word, "", None);
+            // Render the definition from the active scope's dictionary (the one
+            // `--dict` selected, or none for "All"), so a per-language launcher
+            // trigger lands on that dictionary's entry.
+            let filter = scope_filter(ui.get_scope(), &manager);
+            navigate(&ui, &manager, &blocks_model, &history, word, "", filter.as_deref());
         }
         None => {
             let (wotm, wotm_src) = word_of_the_moment(&manager, ui.get_scope(), seed);
@@ -1390,6 +1402,7 @@ fn lang_to_index(lang: Language) -> i32 {
         Language::Auto => 0,
         Language::English => 1,
         Language::French => 2,
+        Language::Italian => 3,
     }
 }
 
@@ -1397,6 +1410,7 @@ fn index_to_lang(index: i32) -> Language {
     match index {
         1 => Language::English,
         2 => Language::French,
+        3 => Language::Italian,
         _ => Language::Auto,
     }
 }

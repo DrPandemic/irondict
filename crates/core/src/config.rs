@@ -17,6 +17,21 @@ pub enum Language {
     English,
     #[serde(rename = "fr")]
     French,
+    #[serde(rename = "it")]
+    Italian,
+}
+
+impl Language {
+    /// The short code used in the config, on the command line, and by the
+    /// launcher integration (`auto` when the language is unpinned).
+    pub fn code(self) -> &'static str {
+        match self {
+            Language::Auto => "auto",
+            Language::English => "en",
+            Language::French => "fr",
+            Language::Italian => "it",
+        }
+    }
 }
 
 /// Whether the UI follows the OS light/dark setting or is pinned by the user.

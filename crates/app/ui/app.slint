@@ -770,7 +770,7 @@ export component AppWindow inherits Window {
                                             alignment: center;
                                             ComboBox {
                                                 width: 116px;
-                                                model: ["Auto", "English", "French"];
+                                                model: ["Auto", "English", "French", "Italian"];
                                                 current-index: d.language;
                                                 selected => { root.set-dict-language(i, self.current-index); }
                                             }
