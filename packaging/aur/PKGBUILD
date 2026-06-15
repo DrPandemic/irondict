@@ -1,6 +1,6 @@
 # Maintainer: DrPandemic <DrPandemic@users.noreply.github.com>
 pkgname=irondict
-pkgver=0.5.0
+pkgver=0.6.0
 pkgrel=1
 pkgdesc="Fast local multi-dictionary lookup with fuzzy headword search — CLI and GUI"
 arch=('x86_64')
@@ -9,7 +9,7 @@ license=('GPL-3.0-or-later')
 makedepends=('cargo')
 optdepends=('albert: launcher integration ("d word" to search the dictionaries)')
 source=("https://github.com/DrPandemic/irondict/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('c7f9118ad98c24cbdb97bc28eae4f2534aa47adeac09a03eacfdfa19b0bcee9f')
+sha256sums=('SKIP')
 
 prepare() {
   cd "$srcdir/$pkgname-$pkgver"
