@@ -1,14 +1,16 @@
 # Maintainer: DrPandemic <DrPandemic@users.noreply.github.com>
 pkgname=irondict
-pkgver=0.4.0
+pkgver=0.5.0
 pkgrel=1
 pkgdesc="Fast local multi-dictionary lookup with fuzzy headword search — CLI and GUI"
 arch=('x86_64')
 url="https://github.com/DrPandemic/irondict"
 license=('GPL-3.0-or-later')
 makedepends=('cargo')
+optdepends=('albert: launcher integration ("d word" to search the dictionaries)')
 source=("https://github.com/DrPandemic/irondict/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('261c0c53b88dd7f2c20fc6209411df3bb297b04d7ad89fad22f762845ad27bd1')
+# Replace with the real checksum once the v${pkgver} tag is pushed, e.g. `updpkgsums`.
+sha256sums=('SKIP')
 
 prepare() {
   cd "$srcdir/$pkgname-$pkgver"
@@ -28,6 +30,11 @@ package() {
 
   install -Dm644 packaging/irondict.desktop \
     "$pkgdir/usr/share/applications/irondict.desktop"
+
+  # Albert launcher plugin (optional; only loads when Albert + its Python plugin
+  # are present). Trigger "d word" lists matches and opens them in the GUI.
+  install -Dm644 packaging/albert/irondict/__init__.py \
+    "$pkgdir/usr/share/albert/python/plugins/irondict/__init__.py"
 
   install -Dm644 crates/app/assets/icons/irondict.svg \
     "$pkgdir/usr/share/icons/hicolor/scalable/apps/irondict.svg"
