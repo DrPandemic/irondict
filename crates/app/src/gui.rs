@@ -266,27 +266,6 @@ fn load_manager() -> DictionaryManager {
     manager
 }
 
-/// Signature of the enabled dictionary set, stored next to the index so we know
-/// whether the cached index is current (mirrors the CLI). Enabling/disabling or
-/// adding/removing a dictionary changes this and forces a rebuild.
-fn index_signature(manager: &DictionaryManager) -> String {
-    let mut lines: Vec<String> = manager
-        .dictionaries()
-        .iter()
-        .filter(|d| d.enabled)
-        .map(|d| {
-            format!(
-                "{}|{}|{}",
-                d.name(),
-                d.path.display(),
-                d.dictionary.info.word_count
-            )
-        })
-        .collect();
-    lines.sort();
-    lines.join("\n")
-}
-
 /// Open the cached index for `manager` when it matches the current dictionary
 /// set, otherwise (re)build it and refresh the manifest. Warmed before returning
 /// so the first keystroke is snappy. Runs on the worker thread with the worker's
@@ -301,7 +280,7 @@ fn prepare_engine(
     progress: impl FnMut(IndexProgress),
 ) -> Result<Option<SearchEngine>, String> {
     let dir = search::default_index_dir().map_err(|e| e.to_string())?;
-    let signature = index_signature(manager);
+    let signature = search::index_signature(manager);
     let cached = std::fs::read_to_string(dir.join("manifest")).ok();
     if cached.as_deref() == Some(signature.as_str()) {
         if let Ok(engine) = SearchEngine::open(&dir) {
@@ -1861,9 +1840,9 @@ fn compute_search(
     let needle = query.trim();
 
     // Prefix (autocomplete) first; fall back to fuzzy for typos. Both are scoped
-    // to the selected dictionary (or all, when no scope is active). Exact-match
-    // headwords are always placed first, even if the prefix query doesn't return
-    // them (tantivy's RegexQuery DFA misses terms exactly matching the literal).
+    // to the selected dictionary (or all, when no scope is active). The engine
+    // already includes and ranks the exact match first (accent-insensitively) and
+    // orders completions shortest-first, so no extra exact pass is needed here.
     let mut hits = engine
         .search_scoped(needle, SearchMode::Prefix, 80, filter)
         .unwrap_or_default();
@@ -1872,24 +1851,6 @@ fn compute_search(
         hits = engine
             .search_scoped(needle, SearchMode::Fuzzy, 40, filter)
             .unwrap_or_default();
-    } else {
-        // Prefix hits are unranked; show the shortest (closest) completion first.
-        hits.sort_by(|a, b| {
-            a.headword
-                .chars()
-                .count()
-                .cmp(&b.headword.chars().count())
-                .then_with(|| a.headword.to_lowercase().cmp(&b.headword.to_lowercase()))
-        });
-    }
-    // Always look up the exact match and place it first, even if the prefix
-    // query missed it (tantivy bug: `go.*` regex doesn't match term "go").
-    if let Ok(exact_hits) = engine.search_scoped(needle, SearchMode::Exact, 1, filter) {
-        if let Some(exact) = exact_hits.into_iter().next() {
-            // Remove any duplicate from prefix results.
-            hits.retain(|h| h.headword.to_lowercase() != needle.to_lowercase());
-            hits.insert(0, exact);
-        }
     }
     hits.truncate(40);
 

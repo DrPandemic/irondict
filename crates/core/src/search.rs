@@ -8,6 +8,7 @@ use tantivy::query::{
 };
 use tantivy::schema::{Field, IndexRecordOption, Schema, Value, STORED, STRING, TEXT};
 use tantivy::{doc, Index, IndexReader, Term};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::manager::DictionaryManager;
 use crate::Error;
@@ -47,8 +48,10 @@ const SNIPPET_LEN: usize = 800;
 struct Fields {
     /// Source dictionary name (untokenized; stored for display).
     dictionary: Field,
-    /// Lowercased headword as a single token, for exact/prefix/fuzzy matching.
-    key: Field,
+    /// Accent- and case-folded headword as a single token (see [`fold`]), for
+    /// exact/prefix/fuzzy matching. Folding lets accent-free queries ("etre")
+    /// match accented headwords ("être").
+    key_folded: Field,
     /// Original-case headword, tokenized for full-text and stored for display.
     headword: Field,
     /// Definition preview, stored for result snippets only — not tokenized, so
@@ -60,7 +63,7 @@ fn schema() -> (Schema, Fields) {
     let mut builder = Schema::builder();
     let fields = Fields {
         dictionary: builder.add_text_field("dictionary", STRING | STORED),
-        key: builder.add_text_field("key", STRING),
+        key_folded: builder.add_text_field("key_folded", STRING),
         headword: builder.add_text_field("headword", TEXT | STORED),
         definition: builder.add_text_field("definition", STORED),
     };
@@ -185,7 +188,7 @@ impl SearchEngine {
             };
             let result = writer.add_document(doc!(
                 fields.dictionary => name,
-                fields.key => entry.headword.to_lowercase(),
+                fields.key_folded => fold(&entry.headword),
                 fields.headword => entry.headword,
                 fields.definition => snippet,
             ));
@@ -255,14 +258,28 @@ impl SearchEngine {
         if mode == SearchMode::Fuzzy {
             return self.fuzzy_search(query, limit, dictionary);
         }
+        let folded = fold(query);
         let parsed: Box<dyn Query> = match mode {
             SearchMode::Exact => {
-                let term = Term::from_field_text(self.fields.key, &query.to_lowercase());
+                let term = Term::from_field_text(self.fields.key_folded, &folded);
                 Box::new(TermQuery::new(term, IndexRecordOption::Basic))
             }
             SearchMode::Prefix => {
-                let pattern = format!("{}.*", regex_escape(&query.to_lowercase()));
-                Box::new(RegexQuery::from_pattern(&pattern, self.fields.key).map_err(map_err)?)
+                // OR an exact term with the prefix regex: tantivy's RegexQuery DFA
+                // can miss a term equal to the literal prefix (e.g. `go.*` not
+                // matching "go"), and matching both clauses also lets the exact
+                // headword out-score partial completions.
+                let pattern = format!("{}.*", regex_escape(&folded));
+                let regex = RegexQuery::from_pattern(&pattern, self.fields.key_folded)
+                    .map_err(map_err)?;
+                let exact = TermQuery::new(
+                    Term::from_field_text(self.fields.key_folded, &folded),
+                    IndexRecordOption::Basic,
+                );
+                Box::new(BooleanQuery::new(vec![
+                    (Occur::Should, Box::new(regex) as Box<dyn Query>),
+                    (Occur::Should, Box::new(exact)),
+                ]))
             }
             SearchMode::Fuzzy => unreachable!("handled above"),
             SearchMode::FullText => {
@@ -290,6 +307,12 @@ impl SearchEngine {
                 score,
                 snippet,
             });
+        }
+        if mode == SearchMode::Prefix {
+            // Prefix/exact are constant-scored, so impose a deterministic order in
+            // Rust (shared by every front-end): exact accent-and-case match first,
+            // then accent-insensitive exact, then shortest completion, then alpha.
+            rank_prefix_exact_first(query, &folded, &mut hits);
         }
         Ok(hits)
     }
@@ -331,14 +354,16 @@ impl SearchEngine {
         limit: usize,
         dictionary: Option<&str>,
     ) -> Result<Vec<SearchHit>, Error> {
-        let lower = query.to_lowercase();
+        // Fuzz over the folded key so accents don't count as edits (être is a
+        // distance-0 match for "etre").
+        let lower = fold(query);
         let len = lower.chars().count();
         // Mild length guard: a single character is too ambiguous to fuzz, but
         // anything longer is allowed the full distance-2 budget. Ranking by true
         // edit distance (below) keeps the closest matches on top regardless.
         let max_distance: u8 = if len <= 1 { 0 } else { 2 };
 
-        let exact = Term::from_field_text(self.fields.key, &lower);
+        let exact = Term::from_field_text(self.fields.key_folded, &lower);
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(
             Occur::Should,
             Box::new(BoostQuery::new(
@@ -379,13 +404,13 @@ impl SearchEngine {
         for (_score, addr) in docs {
             let doc: tantivy::TantivyDocument = searcher.doc(addr).map_err(map_err)?;
             let headword = stored_text(&doc, self.fields.headword);
-            let hw_lower = headword.to_lowercase();
+            let hw_folded = fold(&headword);
             // Prefix guard: keep only candidates sharing the query's first
-            // character — legitimate typo corrections rarely change it.
-            if hw_lower.chars().next() != first {
+            // (folded) character — legitimate typo corrections rarely change it.
+            if hw_folded.chars().next() != first {
                 continue;
             }
-            let distance = edit_distance(&lower, &hw_lower);
+            let distance = edit_distance(&lower, &hw_folded);
             let hit = SearchHit {
                 dictionary: stored_text(&doc, self.fields.dictionary),
                 snippet: snippet_text(&doc, self.fields.definition),
@@ -393,7 +418,7 @@ impl SearchEngine {
                 // A distance-based score so closer matches read as more relevant.
                 score: 1.0 / (1.0 + distance as f32),
             };
-            scored.push((distance, hw_lower.chars().count(), hit));
+            scored.push((distance, hw_folded.chars().count(), hit));
         }
         // Closest first, then shorter headwords, then alphabetical for stability.
         scored.sort_by(|a, b| {
@@ -459,6 +484,63 @@ fn edit_distance(a: &str, b: &str) -> usize {
     one[m]
 }
 
+/// Bumped whenever the index schema or tokenization changes, so a cached index
+/// built by an older binary is rebuilt rather than read with a mismatched layout.
+/// Folded into [`index_signature`].
+const INDEX_VERSION: u32 = 2;
+
+/// Fold a headword or query into an accent- and case-insensitive key: lowercase,
+/// Unicode-decompose (NFD), then drop the combining marks, so "Être", "être" and
+/// "etre" all collapse to "etre". This is what gets indexed and queried, letting
+/// an accent-free query match an accented headword.
+fn fold(s: &str) -> String {
+    s.nfd()
+        .filter(|c| !('\u{0300}'..='\u{036F}').contains(c))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Order prefix hits deterministically (they are otherwise constant-scored):
+/// an exact accent-and-case match first, then an accent-insensitive exact match,
+/// then the shortest completion, then alphabetical for stability. `folded` must
+/// be `fold(query)`. Shared by every front-end so the Albert/CLI path gets the
+/// same exact-first behaviour the GUI used to apply on its own.
+fn rank_prefix_exact_first(query: &str, folded: &str, hits: &mut [SearchHit]) {
+    let q_lower = query.to_lowercase();
+    hits.sort_by_cached_key(|h| {
+        let hw_lower = h.headword.to_lowercase();
+        (
+            hw_lower != q_lower,    // false (accent-and-case exact) sorts first
+            fold(&h.headword) != folded, // then accent-insensitive exact
+            h.headword.chars().count(), // then shortest completion
+            hw_lower,               // then alphabetical
+        )
+    });
+}
+
+/// Signature of the enabled dictionary set (name, path, word count), prefixed
+/// with [`INDEX_VERSION`], stored next to the index so we know whether the cached
+/// index is still current. Changing which dictionaries are enabled (or their word
+/// counts), or bumping the schema version, invalidates the cache and forces a
+/// rebuild. Shared by the CLI and GUI so both invalidate identically.
+pub fn index_signature(manager: &DictionaryManager) -> String {
+    let mut lines: Vec<String> = manager
+        .dictionaries()
+        .iter()
+        .filter(|d| d.enabled)
+        .map(|d| {
+            format!(
+                "{}|{}|{}",
+                d.name(),
+                d.path.display(),
+                d.dictionary.info.word_count
+            )
+        })
+        .collect();
+    lines.sort();
+    format!("v{INDEX_VERSION}\n{}", lines.join("\n"))
+}
+
 /// Escape regex metacharacters so a literal prefix can be used in a
 /// [`RegexQuery`] pattern.
 fn regex_escape(s: &str) -> String {
@@ -477,7 +559,17 @@ fn regex_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::edit_distance;
+    use super::{edit_distance, fold};
+
+    #[test]
+    fn fold_strips_case_and_accents() {
+        assert_eq!(fold("Être"), "etre");
+        assert_eq!(fold("CAFÉ"), "cafe");
+        assert_eq!(fold("Niño"), "nino");
+        assert_eq!(fold("Voilà"), "voila");
+        // ASCII text is only lowercased.
+        assert_eq!(fold("Hello"), "hello");
+    }
 
     #[test]
     fn edit_distance_basics() {

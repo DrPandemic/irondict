@@ -293,33 +293,12 @@ fn print_conjugation(c: &Conjugation) {
     }
 }
 
-/// The signature of the enabled dictionary set, written next to the index so we
-/// know whether the cached index is still current. Changing which dictionaries
-/// are enabled (or their word counts) invalidates the cache and forces a rebuild.
-fn index_signature(manager: &DictionaryManager) -> String {
-    let mut lines: Vec<String> = manager
-        .dictionaries()
-        .iter()
-        .filter(|d| d.enabled)
-        .map(|d| {
-            format!(
-                "{}|{}|{}",
-                d.name(),
-                d.path.display(),
-                d.dictionary.info.word_count
-            )
-        })
-        .collect();
-    lines.sort();
-    lines.join("\n")
-}
-
 /// Open the cached search index if it matches the current dictionary set,
 /// otherwise (re)build it. The index lives under the OS cache dir.
 fn build_or_open_index(manager: &mut DictionaryManager) -> Result<SearchEngine> {
     let dir = search::default_index_dir().context("locating index directory")?;
     let manifest = dir.join("manifest");
-    let signature = index_signature(manager);
+    let signature = search::index_signature(manager);
 
     let cached = std::fs::read_to_string(&manifest).ok();
     if cached.as_deref() == Some(signature.as_str()) {

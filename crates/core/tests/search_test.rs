@@ -21,6 +21,46 @@ fn engine_over_mini() -> (TempDir, SearchEngine) {
     (dir, engine)
 }
 
+/// Write a minimal StarDict dictionary (`sametypesequence=m`, one `m` definition
+/// per word) into `dir` and return the `.ifo` path. Lets a test pick its own
+/// headwords — e.g. accented ones — without committing more binary fixtures. The
+/// `.idx` layout is `word\0` + big-endian u32 offset + u32 size, matching
+/// `tests/fixtures/mini`.
+fn build_stardict(dir: &Path, name: &str, entries: &[(&str, &str)]) -> PathBuf {
+    let mut idx = Vec::new();
+    let mut dict = Vec::new();
+    for (word, def) in entries {
+        let offset = dict.len() as u32;
+        dict.extend_from_slice(def.as_bytes());
+        idx.extend_from_slice(word.as_bytes());
+        idx.push(0);
+        idx.extend_from_slice(&offset.to_be_bytes());
+        idx.extend_from_slice(&(def.len() as u32).to_be_bytes());
+    }
+    let ifo = format!(
+        "version=3.0.0\nbookname={name}\nwordcount={}\nidxfilesize={}\nsametypesequence=m\n",
+        entries.len(),
+        idx.len()
+    );
+    std::fs::write(dir.join(format!("{name}.idx")), &idx).unwrap();
+    std::fs::write(dir.join(format!("{name}.dict")), &dict).unwrap();
+    let ifo_path = dir.join(format!("{name}.ifo"));
+    std::fs::write(&ifo_path, ifo).unwrap();
+    ifo_path
+}
+
+/// Build a search engine over an ad-hoc set of headwords. Both temp dirs (the
+/// fixture and the index) are returned so they outlive the engine.
+fn engine_over_entries(entries: &[(&str, &str)]) -> (TempDir, TempDir, SearchEngine) {
+    let fixture = TempDir::new().unwrap();
+    let path = build_stardict(fixture.path(), "adhoc", entries);
+    let mut mgr = DictionaryManager::new();
+    mgr.add(path).unwrap();
+    let index = TempDir::new().unwrap();
+    let engine = SearchEngine::build(index.path(), &mut mgr).unwrap();
+    (fixture, index, engine)
+}
+
 #[test]
 fn exact_match_is_case_insensitive() {
     let (_dir, engine) = engine_over_mini();
@@ -121,6 +161,41 @@ fn full_text_matches_headwords_not_definitions() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].headword, "cat");
     assert!(hits[0].snippet.contains("furry"));
+}
+
+#[test]
+fn prefix_is_accent_insensitive() {
+    // An accent-free query must reach an accented headword (and not the unrelated
+    // "etage", which only shares the folded prefix up to "et").
+    let (_f, _i, engine) = engine_over_entries(&[("être", "to be"), ("etage", "a floor")]);
+    let hits = engine.search("etre", SearchMode::Prefix, 10).unwrap();
+    assert_eq!(hits[0].headword, "être");
+}
+
+#[test]
+fn exact_is_accent_insensitive() {
+    // Exact lookup ignores both case and accents, so "ETRE" resolves "être".
+    let (_f, _i, engine) = engine_over_entries(&[("être", "to be"), ("etage", "a floor")]);
+    let hits = engine.search("ETRE", SearchMode::Exact, 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].headword, "être");
+}
+
+#[test]
+fn prefix_places_exact_match_first() {
+    // "cat" is an exact headword but also a prefix of "catalog"/"category"; the
+    // engine must surface the exact match first regardless of index order or the
+    // RegexQuery DFA missing the literal term.
+    let (_f, _i, engine) = engine_over_entries(&[
+        ("catalog", "a list"),
+        ("category", "a class"),
+        ("cat", "an animal"),
+    ]);
+    let hits = engine.search("cat", SearchMode::Prefix, 10).unwrap();
+    assert_eq!(hits[0].headword, "cat");
+    // The shorter completion still precedes the longer one.
+    let order: Vec<&str> = hits.iter().map(|h| h.headword.as_str()).collect();
+    assert_eq!(order, ["cat", "catalog", "category"]);
 }
 
 #[test]
