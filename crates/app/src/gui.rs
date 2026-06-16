@@ -17,7 +17,7 @@ use slint::private_unstable_api::re_exports::{parse_markdown, StyledText};
 use slint::{Color, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use irondict_core::{
-    bundled_gcide_path, download, search, Config, ConjugatorRegistry, DictionaryConfig,
+    bundled_gcide_config, download, search, Config, ConjugatorRegistry,
     DictionaryManager, IndexProgress, Language, Preferences, Progress, SearchEngine, SearchMode,
     ThemeMode,
 };
@@ -244,8 +244,7 @@ fn load_manager() -> DictionaryManager {
         Ok(path) => {
             if !path.exists() {
                 let mut c = Config::default();
-                c.dictionaries
-                    .push(DictionaryConfig::new(bundled_gcide_path()));
+                c.dictionaries.push(bundled_gcide_config());
                 let _ = c.save_to(&path);
                 c
             } else {
@@ -254,8 +253,7 @@ fn load_manager() -> DictionaryManager {
         }
         Err(_) => {
             let mut c = Config::default();
-            c.dictionaries
-                .push(DictionaryConfig::new(bundled_gcide_path()));
+            c.dictionaries.push(bundled_gcide_config());
             c
         }
     };

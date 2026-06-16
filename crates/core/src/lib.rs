@@ -13,7 +13,8 @@ pub use conjugation::{
     FrenchConjugator,
 };
 pub use manager::{
-    bundled_gcide_path, DictLoadError, DictionaryManager, LookupResult, ManagedDictionary,
+    bundled_gcide_config, bundled_gcide_path, DictLoadError, DictionaryManager, LookupResult,
+    ManagedDictionary,
 };
 pub use search::{IndexProgress, SearchEngine, SearchHit, SearchMode};
 

@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 use irondict_core::{
-    bundled_gcide_path, download, search, Config, Conjugation, ConjugatorRegistry, DictionaryConfig,
+    bundled_gcide_config, download, search, Config, Conjugation, ConjugatorRegistry,
     DictionaryManager, Language, Progress, SearchEngine, SearchMode,
 };
 
@@ -176,9 +176,7 @@ fn load_manager() -> Result<DictionaryManager> {
 
     let mut config = Config::load_from(&config_path).context("reading config")?;
     if first_run {
-        config
-            .dictionaries
-            .push(DictionaryConfig::new(bundled_gcide_path()));
+        config.dictionaries.push(bundled_gcide_config());
         config
             .save_to(&config_path)
             .context("writing initial config")?;

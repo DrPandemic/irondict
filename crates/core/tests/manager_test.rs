@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use irondict_core::{Config, DictionaryConfig, DictionaryManager};
+use irondict_core::{bundled_gcide_config, Config, DictionaryConfig, DictionaryManager, Language};
 
 fn mini_path() -> PathBuf {
     Path::new(concat!(
@@ -16,6 +16,15 @@ fn gcide_path() -> PathBuf {
         "/assets/gcide/dictd_www.dict.org_gcide.ifo"
     ))
     .to_path_buf()
+}
+
+#[test]
+fn bundled_gcide_seeds_as_english() {
+    // The first-run seed pins English (not Auto) so the launcher integration
+    // exposes an English handler without the user touching settings.
+    let config = bundled_gcide_config();
+    assert_eq!(config.language, Language::English);
+    assert!(config.enabled);
 }
 
 #[test]

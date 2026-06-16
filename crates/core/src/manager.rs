@@ -49,6 +49,17 @@ pub fn bundled_gcide_path() -> PathBuf {
         .unwrap_or_else(|| dev.join(GCIDE_IFO))
 }
 
+/// Config entry for the bundled GCIDE, used to seed a fresh config on first run.
+/// Pinned to [`Language::English`] (rather than `Auto`) so the launcher
+/// integration exposes an English handler out of the box, instead of waiting for
+/// the user to pin the language in settings.
+pub fn bundled_gcide_config() -> DictionaryConfig {
+    DictionaryConfig {
+        language: Language::English,
+        ..DictionaryConfig::new(bundled_gcide_path())
+    }
+}
+
 /// A loaded dictionary together with the bookkeeping the manager needs:
 /// where it came from and whether it is enabled for lookups.
 #[derive(Debug)]
