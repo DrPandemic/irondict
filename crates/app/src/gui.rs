@@ -278,19 +278,14 @@ fn prepare_engine(
     progress: impl FnMut(IndexProgress),
 ) -> Result<Option<SearchEngine>, String> {
     let dir = search::default_index_dir().map_err(|e| e.to_string())?;
-    let signature = search::index_signature(manager);
-    let cached = std::fs::read_to_string(dir.join("manifest")).ok();
-    if cached.as_deref() == Some(signature.as_str()) {
-        if let Ok(engine) = SearchEngine::open(&dir) {
-            warm_up(&engine);
-            return Ok(Some(engine));
-        }
+    if let Ok(engine) = SearchEngine::open(&dir, manager) {
+        warm_up(&engine);
+        return Ok(Some(engine));
     }
     match SearchEngine::build_cancellable(&dir, manager, cancel, progress)
         .map_err(|e| e.to_string())?
     {
         Some(engine) => {
-            let _ = std::fs::write(dir.join("manifest"), &signature);
             warm_up(&engine);
             Ok(Some(engine))
         }

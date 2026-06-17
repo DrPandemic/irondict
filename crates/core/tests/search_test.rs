@@ -213,12 +213,13 @@ fn build_is_idempotent_and_reopenable() {
     mgr.add(mini_path()).unwrap();
     let dir = TempDir::new().unwrap();
 
-    // Building twice into the same directory must not error (rebuild clears it).
+    // Building twice into the same directory must not error: the second build
+    // finds each dictionary's index current and just reopens it.
     SearchEngine::build(dir.path(), &mut mgr).unwrap();
     SearchEngine::build(dir.path(), &mut mgr).unwrap();
 
-    // The on-disk index can be reopened without rebuilding.
-    let engine = SearchEngine::open(dir.path()).unwrap();
+    // The on-disk indexes can be reopened (no rebuild) for the same dict set.
+    let engine = SearchEngine::open(dir.path(), &mgr).unwrap();
     let hits = engine.search("world", SearchMode::Prefix, 10).unwrap();
     assert_eq!(hits[0].headword, "world");
 }
@@ -235,4 +236,86 @@ fn disabled_dictionaries_are_not_indexed() {
         .search("hello", SearchMode::Prefix, 10)
         .unwrap()
         .is_empty());
+}
+
+/// The sorted file names of every per-dict index subdirectory under `root`,
+/// keyed by subdirectory name. tantivy names its segment files with a random
+/// UUID per build, so a rebuilt dictionary's file set changes while a reused
+/// one's is byte-for-byte identical — letting a test prove which dicts were
+/// (re)built (PLAN.md §1a: changing dict A must not rebuild dict B).
+fn index_fingerprint(root: &Path) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut out = std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir(root).unwrap().flatten() {
+        if entry.path().is_dir() {
+            let mut files: Vec<String> = std::fs::read_dir(entry.path())
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            files.sort();
+            out.insert(entry.file_name().to_string_lossy().into_owned(), files);
+        }
+    }
+    out
+}
+
+#[test]
+fn changing_one_dictionary_does_not_rebuild_the_others() {
+    // Two independent dictionaries, indexed into a shared per-dict index root.
+    let fixture = TempDir::new().unwrap();
+    let a = build_stardict(fixture.path(), "alpha", &[("apple", "a fruit")]);
+    let b = build_stardict(fixture.path(), "bravo", &[("banana", "also a fruit")]);
+    let index = TempDir::new().unwrap();
+
+    let mut mgr = DictionaryManager::new();
+    mgr.add(&a).unwrap();
+    mgr.add(&b).unwrap();
+    SearchEngine::build(index.path(), &mut mgr).unwrap();
+    let before = index_fingerprint(index.path());
+    assert_eq!(before.len(), 2, "one index dir per dictionary");
+
+    // Add a third dictionary and rebuild. Only the new one should be indexed;
+    // the two existing per-dict indexes must be reused untouched.
+    let c = build_stardict(fixture.path(), "charlie", &[("cherry", "a small fruit")]);
+    let mut mgr = DictionaryManager::new();
+    mgr.add(&a).unwrap();
+    mgr.add(&b).unwrap();
+    mgr.add(&c).unwrap();
+    let engine = SearchEngine::build(index.path(), &mut mgr).unwrap();
+    let after = index_fingerprint(index.path());
+
+    assert_eq!(after.len(), 3, "third dictionary added its own index dir");
+    for (id, files) in &before {
+        assert_eq!(
+            after.get(id),
+            Some(files),
+            "an unchanged dictionary's index must be reused, not rebuilt"
+        );
+    }
+    // All three are searchable through the merged engine.
+    for (q, want) in [("apple", "apple"), ("banana", "banana"), ("cherry", "cherry")] {
+        let hits = engine.search(q, SearchMode::Prefix, 10).unwrap();
+        assert_eq!(hits[0].headword, want);
+    }
+}
+
+#[test]
+fn merged_results_rank_exact_match_first_across_dictionaries() {
+    // The exact match lives in one dictionary while a prefix completion lives in
+    // another; merging the two per-dict result lists must still surface the exact
+    // headword first (the same total order a single shared index produced).
+    let fixture = TempDir::new().unwrap();
+    let a = build_stardict(fixture.path(), "first", &[("catalog", "a list")]);
+    let b = build_stardict(fixture.path(), "second", &[("cat", "an animal")]);
+    let index = TempDir::new().unwrap();
+
+    let mut mgr = DictionaryManager::new();
+    mgr.add(&a).unwrap();
+    mgr.add(&b).unwrap();
+    let engine = SearchEngine::build(index.path(), &mut mgr).unwrap();
+
+    let hits = engine.search("cat", SearchMode::Prefix, 10).unwrap();
+    let order: Vec<&str> = hits.iter().map(|h| h.headword.as_str()).collect();
+    assert_eq!(order, ["cat", "catalog"]);
+    assert_eq!(hits[0].dictionary, "second");
 }

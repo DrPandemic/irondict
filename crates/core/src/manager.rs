@@ -243,27 +243,19 @@ impl DictionaryManager {
         Ok(Vec::new())
     }
 
-    /// Visit every entry of every enabled dictionary, calling `f` with the
-    /// source dictionary's name and the entry. Used to populate the search
-    /// index (Phase 5).
-    /// Call `f` for every entry of every enabled dictionary. `f` returns
-    /// [`ControlFlow::Break`] to stop early (e.g. a cancelled index build); the
-    /// break halts iteration across dictionaries, not just within the current one.
-    pub fn for_each_enabled_entry(
+    /// Visit every entry of the enabled dictionary loaded from `path`, calling
+    /// `f` per entry. Used to (re)build that dictionary's own search index
+    /// without touching the others (per-dict indexing — PLAN.md §1a), so an
+    /// unchanged dictionary is never re-decoded. Matched by path (the unique
+    /// key) rather than name, which can be shared. `f` returns
+    /// [`ControlFlow::Break`] to stop early (e.g. a cancelled build).
+    pub fn for_each_entry_in(
         &mut self,
-        mut f: impl FnMut(&str, Entry) -> ControlFlow<()>,
+        path: &Path,
+        f: impl FnMut(Entry) -> ControlFlow<()>,
     ) -> Result<(), Error> {
-        for d in self.dicts.iter_mut().filter(|d| d.enabled) {
-            let name = d.dictionary.info.name.clone();
-            let mut stopped = false;
-            d.dictionary.for_each_entry(|entry| {
-                let flow = f(&name, entry);
-                stopped = flow.is_break();
-                flow
-            })?;
-            if stopped {
-                break;
-            }
+        if let Some(d) = self.dicts.iter_mut().find(|d| d.enabled && d.path == path) {
+            d.dictionary.for_each_entry(f)?;
         }
         Ok(())
     }

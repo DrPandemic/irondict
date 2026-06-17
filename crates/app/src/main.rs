@@ -285,24 +285,16 @@ fn print_conjugation(c: &Conjugation) {
     }
 }
 
-/// Open the cached search index if it matches the current dictionary set,
-/// otherwise (re)build it. The index lives under the OS cache dir.
+/// Open the cached per-dictionary indexes if they're all current, otherwise
+/// (re)build — which rebuilds only the dictionaries whose index is stale or
+/// missing and reuses the rest. The indexes live under the OS cache dir.
 fn build_or_open_index(manager: &mut DictionaryManager) -> Result<SearchEngine> {
     let dir = search::default_index_dir().context("locating index directory")?;
-    let manifest = dir.join("manifest");
-    let signature = search::index_signature(manager);
-
-    let cached = std::fs::read_to_string(&manifest).ok();
-    if cached.as_deref() == Some(signature.as_str()) {
-        if let Ok(engine) = SearchEngine::open(&dir) {
-            return Ok(engine);
-        }
+    if let Ok(engine) = SearchEngine::open(&dir, manager) {
+        return Ok(engine);
     }
-
     eprintln!("Building search index...");
-    let engine = SearchEngine::build(&dir, manager).context("building search index")?;
-    std::fs::write(&manifest, &signature).context("writing index manifest")?;
-    Ok(engine)
+    SearchEngine::build(&dir, manager).context("building search index")
 }
 
 fn run_search(query: &str, mode: SearchMode, limit: usize, dict: Option<&str>) -> Result<()> {
