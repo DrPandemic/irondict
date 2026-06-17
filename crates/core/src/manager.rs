@@ -230,6 +230,19 @@ impl DictionaryManager {
         Ok(results)
     }
 
+    /// Look up `word` in a single enabled dictionary (matched by name), returning
+    /// its entries if present. Used to fetch a result-list preview snippet on
+    /// demand — the search index no longer stores definitions, so the front-end
+    /// reads the snippet straight from the source dictionary for the hit.
+    pub fn lookup_in(&mut self, dictionary: &str, word: &str) -> Result<Vec<Entry>, Error> {
+        for d in self.dicts.iter_mut().filter(|d| d.enabled) {
+            if d.dictionary.info.name == dictionary {
+                return Ok(d.dictionary.lookup(word)?.unwrap_or_default());
+            }
+        }
+        Ok(Vec::new())
+    }
+
     /// Visit every entry of every enabled dictionary, calling `f` with the
     /// source dictionary's name and the entry. Used to populate the search
     /// index (Phase 5).

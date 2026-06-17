@@ -62,20 +62,13 @@ fn engine_over_entries(entries: &[(&str, &str)]) -> (TempDir, TempDir, SearchEng
 }
 
 #[test]
-fn exact_match_is_case_insensitive() {
+fn prefix_full_word_is_case_insensitive() {
     let (_dir, engine) = engine_over_mini();
-    let hits = engine.search("HELLO", SearchMode::Exact, 10).unwrap();
-    assert_eq!(hits.len(), 1);
+    // A full-word query (the former "exact" case) matches case-insensitively and
+    // ranks the exact headword first.
+    let hits = engine.search("HELLO", SearchMode::Prefix, 10).unwrap();
     assert_eq!(hits[0].headword, "hello");
     assert_eq!(hits[0].dictionary, "mini");
-}
-
-#[test]
-fn exact_match_does_not_match_prefix() {
-    let (_dir, engine) = engine_over_mini();
-    // "hell" is only a prefix of "hello", not an exact headword.
-    let hits = engine.search("hell", SearchMode::Exact, 10).unwrap();
-    assert!(hits.is_empty());
 }
 
 #[test]
@@ -144,23 +137,20 @@ fn cancelled_build_yields_no_engine() {
     assert!(outcome.is_none());
     // The abandoned index isn't usable; a fresh, uncancelled build still works.
     let engine = SearchEngine::build(dir.path(), &mut mgr).unwrap();
-    let hits = engine.search("hello", SearchMode::Exact, 10).unwrap();
+    let hits = engine.search("hello", SearchMode::Prefix, 10).unwrap();
     assert_eq!(hits.len(), 1);
 }
 
 #[test]
-fn full_text_matches_headwords_not_definitions() {
+fn search_matches_headwords_not_definitions() {
     let (_dir, engine) = engine_over_mini();
     // "furry" appears only in the definition of "cat" ("a furry animal"), not as
-    // a headword — search matches headwords only, so it must not surface "cat".
-    let hits = engine.search("furry", SearchMode::FullText, 10).unwrap();
+    // a headword — definitions are never indexed, so it must not surface "cat".
+    let hits = engine.search("furry", SearchMode::Prefix, 10).unwrap();
     assert!(hits.is_empty());
-    // The headword itself still matches, and the definition is still stored for
-    // the result snippet even though it isn't searchable.
-    let hits = engine.search("cat", SearchMode::FullText, 10).unwrap();
-    assert_eq!(hits.len(), 1);
+    // The headword itself still matches.
+    let hits = engine.search("cat", SearchMode::Prefix, 10).unwrap();
     assert_eq!(hits[0].headword, "cat");
-    assert!(hits[0].snippet.contains("furry"));
 }
 
 #[test]
@@ -173,10 +163,11 @@ fn prefix_is_accent_insensitive() {
 }
 
 #[test]
-fn exact_is_accent_insensitive() {
-    // Exact lookup ignores both case and accents, so "ETRE" resolves "être".
+fn prefix_full_word_is_accent_and_case_insensitive() {
+    // A full-word query ignores both case and accents, so "ETRE" resolves "être"
+    // (and not the unrelated "etage", which doesn't share the folded prefix).
     let (_f, _i, engine) = engine_over_entries(&[("être", "to be"), ("etage", "a floor")]);
-    let hits = engine.search("ETRE", SearchMode::Exact, 10).unwrap();
+    let hits = engine.search("ETRE", SearchMode::Prefix, 10).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].headword, "être");
 }
@@ -202,7 +193,7 @@ fn prefix_places_exact_match_first() {
 fn empty_query_returns_no_hits() {
     let (_dir, engine) = engine_over_mini();
     assert!(engine
-        .search("   ", SearchMode::FullText, 10)
+        .search("   ", SearchMode::Prefix, 10)
         .unwrap()
         .is_empty());
 }
@@ -211,7 +202,7 @@ fn empty_query_returns_no_hits() {
 fn missing_query_returns_no_hits() {
     let (_dir, engine) = engine_over_mini();
     assert!(engine
-        .search("nonexistentxyz", SearchMode::Exact, 10)
+        .search("nonexistentxyz", SearchMode::Prefix, 10)
         .unwrap()
         .is_empty());
 }
@@ -228,7 +219,7 @@ fn build_is_idempotent_and_reopenable() {
 
     // The on-disk index can be reopened without rebuilding.
     let engine = SearchEngine::open(dir.path()).unwrap();
-    let hits = engine.search("world", SearchMode::Exact, 10).unwrap();
+    let hits = engine.search("world", SearchMode::Prefix, 10).unwrap();
     assert_eq!(hits[0].headword, "world");
 }
 
@@ -241,7 +232,7 @@ fn disabled_dictionaries_are_not_indexed() {
     let dir = TempDir::new().unwrap();
     let engine = SearchEngine::build(dir.path(), &mut mgr).unwrap();
     assert!(engine
-        .search("hello", SearchMode::Exact, 10)
+        .search("hello", SearchMode::Prefix, 10)
         .unwrap()
         .is_empty());
 }

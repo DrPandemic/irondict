@@ -44,7 +44,7 @@ enum Command {
         /// The query to search for.
         query: String,
         /// How to match the query.
-        #[arg(long, value_enum, default_value_t = Mode::FullText)]
+        #[arg(long, value_enum, default_value_t = Mode::Prefix)]
         mode: Mode,
         /// Maximum number of results to return.
         #[arg(long, default_value_t = 20)]
@@ -100,23 +100,17 @@ enum Command {
 /// CLI mirror of [`SearchMode`].
 #[derive(Clone, Copy, ValueEnum)]
 enum Mode {
-    /// Exact (case-insensitive) headword match.
-    Exact,
-    /// Headword starts with the query.
+    /// Headword starts with the query; the exact match ranks first.
     Prefix,
     /// Typo-tolerant headword match.
     Fuzzy,
-    /// Free-text match across headwords and definitions.
-    FullText,
 }
 
 impl From<Mode> for SearchMode {
     fn from(mode: Mode) -> Self {
         match mode {
-            Mode::Exact => SearchMode::Exact,
             Mode::Prefix => SearchMode::Prefix,
             Mode::Fuzzy => SearchMode::Fuzzy,
-            Mode::FullText => SearchMode::FullText,
         }
     }
 }

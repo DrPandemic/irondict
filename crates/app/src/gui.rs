@@ -1852,11 +1852,14 @@ fn compute_search(
     }
     hits.truncate(40);
 
+    // The index no longer stores definitions, so read each row's preview snippet
+    // on demand from the dictionary it was found in. Result lists are short
+    // (truncated above), so the per-row lookup is bounded.
     let items: Vec<RenderedItem> = hits
         .iter()
         .map(|h| RenderedItem {
             headword: h.headword.clone(),
-            snippet: make_snippet(&h.snippet),
+            snippet: fetch_snippet(manager, &h.dictionary, &h.headword),
             source: h.dictionary.clone(),
         })
         .collect();
@@ -2831,6 +2834,31 @@ fn cleaned_plain(raw: &str) -> String {
         joined = joined.replace("\n\n\n", "\n\n");
     }
     joined.trim().to_string()
+}
+
+/// Leading slice of a definition scanned when building a result-list snippet.
+/// Generous because HTML entries can open with a few hundred characters of
+/// inline-CSS tags before any visible text; `make_snippet` strips the markup and
+/// then truncates to a display length.
+const SNIPPET_SCAN_LEN: usize = 800;
+
+/// Fetch a result-list preview snippet for `headword` from the dictionary it was
+/// found in. The search index no longer stores definitions (see `SearchHit`), so
+/// the snippet is read on demand from the source dictionary and bounded before
+/// the (potentially HTML/GCIDE-heavy) `make_snippet` processing.
+fn fetch_snippet(manager: &mut DictionaryManager, dictionary: &str, headword: &str) -> String {
+    let entries = manager.lookup_in(dictionary, headword).unwrap_or_default();
+    let raw: String = entries
+        .iter()
+        .flat_map(|e| e.segments.iter())
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let bounded = match raw.char_indices().nth(SNIPPET_SCAN_LEN) {
+        Some((idx, _)) => &raw[..idx],
+        None => &raw,
+    };
+    make_snippet(bounded)
 }
 
 /// A one-line preview for the results list. HTML entries are stripped to text;

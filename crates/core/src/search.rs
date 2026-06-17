@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use tantivy::collector::TopDocs;
 use tantivy::query::{
-    BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, Query, QueryParser, RegexQuery, TermQuery,
+    BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, Query, RegexQuery, TermQuery,
 };
-use tantivy::schema::{Field, IndexRecordOption, Schema, Value, STORED, STRING, TEXT};
+use tantivy::schema::{Field, IndexRecordOption, Schema, Value, STORED, STRING};
 use tantivy::{doc, Index, IndexReader, Term};
 use unicode_normalization::UnicodeNormalization;
 
@@ -16,32 +16,24 @@ use crate::Error;
 /// How a query string is matched against the index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {
-    /// Exact (case-insensitive) headword match.
-    Exact,
-    /// Headword starts with the query (autocomplete).
+    /// Headword starts with the query (autocomplete). The exact match, when one
+    /// exists, is ranked first (see [`rank_prefix_exact_first`]), so this also
+    /// serves the "look up this exact word" case.
     Prefix,
     /// Typo-tolerant headword match (Levenshtein distance up to 2).
     Fuzzy,
-    /// Tokenized headword match (BM25 ranked); handles multi-word headwords.
-    FullText,
 }
 
-/// One search result: which dictionary it came from, the matched headword, the
-/// relevance score (higher is better), and a short raw definition preview (so
-/// front-ends can show a snippet without a second lookup).
+/// One search result: which dictionary it came from, the matched headword, and
+/// the relevance score (higher is better). The index no longer stores a
+/// definition preview; front-ends fetch a snippet on demand via the normal
+/// lookup path when they want one (see the GUI result list).
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     pub dictionary: String,
     pub headword: String,
     pub score: f32,
-    pub snippet: String,
 }
-
-/// Leading slice of a stored definition, for result-list previews. Generous
-/// because HTML entries (e.g. Petit Robert) can open with a few hundred
-/// characters of inline-CSS tags before any visible text; front-ends strip the
-/// markup and then truncate to a display length.
-const SNIPPET_LEN: usize = 800;
 
 /// Tantivy schema field handles for the dictionary index.
 #[derive(Clone, Copy)]
@@ -49,14 +41,11 @@ struct Fields {
     /// Source dictionary name (untokenized; stored for display).
     dictionary: Field,
     /// Accent- and case-folded headword as a single token (see [`fold`]), for
-    /// exact/prefix/fuzzy matching. Folding lets accent-free queries ("etre")
-    /// match accented headwords ("être").
+    /// prefix/fuzzy matching. Folding lets accent-free queries ("etre") match
+    /// accented headwords ("être").
     key_folded: Field,
-    /// Original-case headword, tokenized for full-text and stored for display.
+    /// Original-case headword as a single token; stored for display.
     headword: Field,
-    /// Definition preview, stored for result snippets only — not tokenized, so
-    /// searches match the headword, never the body text.
-    definition: Field,
 }
 
 fn schema() -> (Schema, Fields) {
@@ -64,8 +53,7 @@ fn schema() -> (Schema, Fields) {
     let fields = Fields {
         dictionary: builder.add_text_field("dictionary", STRING | STORED),
         key_folded: builder.add_text_field("key_folded", STRING),
-        headword: builder.add_text_field("headword", TEXT | STORED),
-        definition: builder.add_text_field("definition", STORED),
+        headword: builder.add_text_field("headword", STRING | STORED),
     };
     (builder.build(), fields)
 }
@@ -83,11 +71,10 @@ pub struct IndexProgress {
 }
 
 /// A search index over the headwords of the enabled dictionaries (definitions
-/// are stored for previews but not searchable). Backed by a tantivy index stored
-/// on disk so it can be cached across runs and only rebuilt when the set of
-/// dictionaries changes.
+/// are neither indexed nor stored). Backed by a tantivy index stored on disk so
+/// it can be cached across runs and only rebuilt when the set of dictionaries
+/// changes.
 pub struct SearchEngine {
-    index: Index,
     reader: IndexReader,
     fields: Fields,
 }
@@ -174,23 +161,14 @@ impl SearchEngine {
                     total,
                 });
             }
-            let definition: String = entry
-                .segments
-                .iter()
-                .map(|s| s.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
-            // Store only a leading preview (the body isn't searchable, just shown
-            // as a result snippet), keeping the on-disk index small.
-            let snippet = match definition.char_indices().nth(SNIPPET_LEN) {
-                Some((idx, _)) => &definition[..idx],
-                None => &definition,
-            };
+            // Index only the headword (folded for matching, original for display).
+            // Definitions are never searched and no longer stored — front-ends
+            // fetch a preview snippet on demand via the lookup path — which keeps
+            // the on-disk index small.
             let result = writer.add_document(doc!(
                 fields.dictionary => name,
                 fields.key_folded => fold(&entry.headword),
                 fields.headword => entry.headword,
-                fields.definition => snippet,
             ));
             if let Err(e) = result {
                 indexing_error = Some(map_err(e));
@@ -210,11 +188,7 @@ impl SearchEngine {
         writer.commit().map_err(map_err)?;
 
         let reader = index.reader().map_err(map_err)?;
-        Ok(Some(Self {
-            index,
-            reader,
-            fields,
-        }))
+        Ok(Some(Self { reader, fields }))
     }
 
     /// Open an index previously built in `dir`.
@@ -222,11 +196,7 @@ impl SearchEngine {
         let index = Index::open_in_dir(dir).map_err(map_err)?;
         let (_, fields) = schema();
         let reader = index.reader().map_err(map_err)?;
-        Ok(Self {
-            index,
-            reader,
-            fields,
-        })
+        Ok(Self { reader, fields })
     }
 
     /// Run `query` in the given `mode`, returning up to `limit` ranked hits
@@ -258,36 +228,22 @@ impl SearchEngine {
         if mode == SearchMode::Fuzzy {
             return self.fuzzy_search(query, limit, dictionary);
         }
+        // Prefix is the only non-fuzzy mode. OR an exact term with the prefix
+        // regex: tantivy's RegexQuery DFA can miss a term equal to the literal
+        // prefix (e.g. `go.*` not matching "go"), and matching both clauses also
+        // lets the exact headword out-score partial completions.
+        debug_assert_eq!(mode, SearchMode::Prefix);
         let folded = fold(query);
-        let parsed: Box<dyn Query> = match mode {
-            SearchMode::Exact => {
-                let term = Term::from_field_text(self.fields.key_folded, &folded);
-                Box::new(TermQuery::new(term, IndexRecordOption::Basic))
-            }
-            SearchMode::Prefix => {
-                // OR an exact term with the prefix regex: tantivy's RegexQuery DFA
-                // can miss a term equal to the literal prefix (e.g. `go.*` not
-                // matching "go"), and matching both clauses also lets the exact
-                // headword out-score partial completions.
-                let pattern = format!("{}.*", regex_escape(&folded));
-                let regex = RegexQuery::from_pattern(&pattern, self.fields.key_folded)
-                    .map_err(map_err)?;
-                let exact = TermQuery::new(
-                    Term::from_field_text(self.fields.key_folded, &folded),
-                    IndexRecordOption::Basic,
-                );
-                Box::new(BooleanQuery::new(vec![
-                    (Occur::Should, Box::new(regex) as Box<dyn Query>),
-                    (Occur::Should, Box::new(exact)),
-                ]))
-            }
-            SearchMode::Fuzzy => unreachable!("handled above"),
-            SearchMode::FullText => {
-                let parser = QueryParser::for_index(&self.index, vec![self.fields.headword]);
-                let (parsed, _errors) = parser.parse_query_lenient(query);
-                parsed
-            }
-        };
+        let pattern = format!("{}.*", regex_escape(&folded));
+        let regex = RegexQuery::from_pattern(&pattern, self.fields.key_folded).map_err(map_err)?;
+        let exact = TermQuery::new(
+            Term::from_field_text(self.fields.key_folded, &folded),
+            IndexRecordOption::Basic,
+        );
+        let parsed: Box<dyn Query> = Box::new(BooleanQuery::new(vec![
+            (Occur::Should, Box::new(regex) as Box<dyn Query>),
+            (Occur::Should, Box::new(exact)),
+        ]));
         let parsed = self.with_scope(parsed, dictionary);
 
         let searcher = self.reader.searcher();
@@ -300,12 +256,10 @@ impl SearchEngine {
             let doc: tantivy::TantivyDocument = searcher.doc(addr).map_err(map_err)?;
             let dictionary = stored_text(&doc, self.fields.dictionary);
             let headword = stored_text(&doc, self.fields.headword);
-            let snippet = snippet_text(&doc, self.fields.definition);
             hits.push(SearchHit {
                 dictionary,
                 headword,
                 score,
-                snippet,
             });
         }
         if mode == SearchMode::Prefix {
@@ -413,7 +367,6 @@ impl SearchEngine {
             let distance = edit_distance(&lower, &hw_folded);
             let hit = SearchHit {
                 dictionary: stored_text(&doc, self.fields.dictionary),
-                snippet: snippet_text(&doc, self.fields.definition),
                 headword,
                 // A distance-based score so closer matches read as more relevant.
                 score: 1.0 / (1.0 + distance as f32),
@@ -429,15 +382,6 @@ impl SearchEngine {
             })
         });
         Ok(scored.into_iter().take(limit).map(|(_, _, h)| h).collect())
-    }
-}
-
-/// Leading slice of a stored field, on a char boundary, for snippet previews.
-fn snippet_text(doc: &tantivy::TantivyDocument, field: Field) -> String {
-    let full = doc.get_first(field).and_then(|v| v.as_str()).unwrap_or("");
-    match full.char_indices().nth(SNIPPET_LEN) {
-        Some((idx, _)) => full[..idx].to_string(),
-        None => full.to_string(),
     }
 }
 
@@ -487,7 +431,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 /// Bumped whenever the index schema or tokenization changes, so a cached index
 /// built by an older binary is rebuilt rather than read with a mismatched layout.
 /// Folded into [`index_signature`].
-const INDEX_VERSION: u32 = 2;
+const INDEX_VERSION: u32 = 3;
 
 /// Fold a headword or query into an accent- and case-insensitive key: lowercase,
 /// Unicode-decompose (NFD), then drop the combining marks, so "Être", "être" and
