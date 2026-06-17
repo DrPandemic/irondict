@@ -453,12 +453,28 @@ export component AppWindow inherits Window {
                             padding-top: 11px;
                             padding-bottom: 11px;
                             spacing: 3px;
-                            Text {
-                                text: item.headword;
-                                font-size: 14px;
-                                font-weight: 500;
-                                color: text-primary;
-                                overflow: elide;
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Text {
+                                    text: item.headword;
+                                    font-size: 14px;
+                                    font-weight: 500;
+                                    color: text-primary;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                                // source label — only useful when searching all
+                                // dictionaries (scope 0); a scoped search makes
+                                // every row the same dictionary.
+                                Text {
+                                    visible: root.scope == 0 && item.source != "";
+                                    text: item.source;
+                                    font-size: 11px;
+                                    font-weight: 500;
+                                    color: accent;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 0;
+                                }
                             }
                             Text {
                                 text: item.snippet;
