@@ -1624,6 +1624,16 @@ fn compute_page(
         (parsed.pronunciation, parsed.pos, String::new(), blocks)
     };
 
+    // Hide the pronunciation line when it merely echoes the headword: GCIDE's
+    // respelling of a word with no phonetic diacritics (e.g. "Hel·lo" for "Hello")
+    // adds nothing over the title, while genuine phonetics (vowel diacritics, IPA)
+    // differ from the headword and are kept.
+    let pron = if pron_echoes_headword(&pron, headword) {
+        String::new()
+    } else {
+        pron
+    };
+
     // Convert each block's text to markdown with clickable cross-reference links.
     // GCIDE `{word}` braces and HTML `bword://` anchors (carried as `LINK_*`
     // sentinels) both become `[word](lookup://word)` links, and HTML `<b>`/`<i>`
@@ -2717,6 +2727,20 @@ fn clean_pron(s: &str) -> String {
     out.trim_matches('·').trim().to_string()
 }
 
+/// Whether `pron` is just the headword respelled with syllable breaks and no
+/// phonetic diacritics, comparing only the letters/digits of each (case-folded).
+/// GCIDE's "Hel·lo" for "Hello" echoes the word, so the card drops it; respellings
+/// that add information ("är·kē·ŏl·ō·gy", IPA "(h)ɛ.lo") differ and are kept.
+fn pron_echoes_headword(pron: &str, headword: &str) -> bool {
+    let letters = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    !pron.is_empty() && letters(pron) == letters(headword)
+}
+
 fn expand_pos(p: &str) -> String {
     let norm: String = p.chars().filter(|c| !c.is_whitespace()).collect();
     match norm.as_str() {
@@ -2816,16 +2840,44 @@ fn split_body_quotes(lines: &[&str]) -> Option<Sense> {
     }
 }
 
-/// For entries without numbered senses: strip the header (pronunciation,
-/// etymology), returning the remaining prose as a single sense plus any
-/// quotations attached to it.
+/// For entries without numbered senses: drop the headword line, strip the
+/// pronunciation and etymology, and return the remaining prose as a single sense
+/// plus any quotations attached to it.
 fn unnumbered_sense(text: &str) -> Option<Sense> {
     static PRON: OnceLock<Regex> = OnceLock::new();
     static BR: OnceLock<Regex> = OnceLock::new();
-    let no_pron = re(&PRON, r"\\[^\\]*\\").replace_all(text, "");
+    // Drop the GCIDE headword line(s) — `Headword \respelling\ (phon), pos.` — so
+    // the body doesn't repeat the word and pronunciation the card already shows in
+    // its header. Usually the definition is on the indented lines that follow; if
+    // header and definition share a single line, strip just the leading
+    // `Headword \respelling\ (phon)` prefix instead so the definition survives.
+    let kept: Vec<&str> = text.lines().filter(|l| !is_header_line(l)).collect();
+    let src = if kept.iter().any(|l| !l.trim().is_empty()) {
+        kept.join("\n")
+    } else {
+        strip_header_prefix(text)
+    };
+    let no_pron = re(&PRON, r"\\[^\\]*\\").replace_all(&src, "");
     let no_etym = re(&BR, r"(?s)\[[^\[\]]*\]").replace_all(&no_pron, "");
     let lines: Vec<&str> = no_etym.lines().collect();
     split_body_quotes(&lines)
+}
+
+/// A GCIDE headword line: flush-left (definition and quotation lines are
+/// indented) and carrying a `\respelling\`. Used to drop the redundant
+/// headword/pronunciation line from an unnumbered entry's body.
+fn is_header_line(line: &str) -> bool {
+    !line.trim().is_empty() && !line.starts_with(char::is_whitespace) && line.contains('\\')
+}
+
+/// Strip a leading `Headword \respelling\ (phon)` prefix from GCIDE text, keeping
+/// the part of speech and definition that follow. Used for one-line entries where
+/// the headword/pronunciation can't be dropped as a whole line.
+fn strip_header_prefix(text: &str) -> String {
+    static HEADER: OnceLock<Regex> = OnceLock::new();
+    re(&HEADER, r"^[^\\\n]*\\[^\\]*\\\s*(\([^()]*\)\s*)?")
+        .replace(text, "")
+        .into_owned()
 }
 
 fn cleaned_plain(raw: &str) -> String {
@@ -2858,19 +2910,19 @@ fn fetch_snippet(manager: &mut DictionaryManager, dictionary: &str, headword: &s
         Some((idx, _)) => &raw[..idx],
         None => &raw,
     };
-    make_snippet(bounded)
+    make_snippet(bounded, headword)
 }
 
-/// A one-line preview for the results list. HTML entries are stripped to text;
-/// GCIDE entries prefer the first numbered sense.
-fn make_snippet(raw: &str) -> String {
+/// A one-line preview for the results list, built from the same parse the card
+/// body uses so the two agree: the headword line and its pronunciation are
+/// dropped, leaving the first sense/definition. `headword` lets the HTML path
+/// drop the matching headword line.
+fn make_snippet(raw: &str, headword: &str) -> String {
     let tail = if raw.contains('<') {
-        // HTML entry: drop the leading headword block so the preview shows the
-        // definition text, not a repeat of the card title.
+        // HTML entry: drop the headword/pronunciation line(s) like the card does,
+        // then show the remaining definition text.
         let mut blocks = html_to_blocks(raw);
-        if blocks.len() > 1 {
-            blocks.remove(0);
-        }
+        extract_html_header(&mut blocks, headword);
         let joined = blocks
             .iter()
             .map(|b| b.text.as_str())
@@ -2878,10 +2930,14 @@ fn make_snippet(raw: &str) -> String {
             .join(" ");
         strip_link_markers(&joined)
     } else {
-        let flat = collapse_ws(&strip_braces(raw));
-        let start = flat.find(" 1. ").map(|i| i + 4).unwrap_or(0);
-        decode_gcide(&flat[start..])
+        // GCIDE: the parsed first sense already has the header stripped (numbered
+        // or not); fall back to lightly-cleaned text if parsing finds no sense.
+        match parse_entry(raw).senses.into_iter().next() {
+            Some(sense) => sense.body,
+            None => collapse_ws(&decode_gcide(&strip_braces(raw))),
+        }
     };
+    let tail = tail.trim_start();
     let mut chars = tail.chars();
     let head: String = chars.by_ref().take(90).collect();
     if chars.next().is_some() {
@@ -3385,6 +3441,56 @@ mod tests {
         assert_eq!(parsed.senses.len(), 1);
         assert_eq!(parsed.senses[0].body, "The science of antiquities.");
         assert!(parsed.senses[0].quotes.is_empty());
+    }
+
+    #[test]
+    fn unnumbered_entry_drops_headword_and_pronunciation() {
+        // An entry with no numbered senses: the body must start at the definition,
+        // not repeat the headword line (`Hello \Hel*lo"\, interj. & n.`) whose word
+        // and pronunciation the card already shows in its header.
+        let raw = "Hello \\Hel*lo\"\\, interj. & n.\n   \
+                   An exclamation used as a greeting.\n   \
+                   [1913 Webster +PJC]\n";
+        let parsed = parse_entry(raw);
+        assert_eq!(parsed.pronunciation, "Hel·lo");
+        assert_eq!(parsed.senses.len(), 1);
+        assert_eq!(parsed.senses[0].body, "An exclamation used as a greeting.");
+    }
+
+    #[test]
+    fn pronunciation_echoing_headword_is_hidden() {
+        // GCIDE's syllabified respelling of the word adds nothing over the title.
+        assert!(pron_echoes_headword("Hel·lo", "Hello"));
+        assert!(pron_echoes_headword("Dic·tion·a·ry", "Dictionary"));
+        // Phonetic diacritics and IPA carry information, so they're kept.
+        assert!(!pron_echoes_headword("är·kē·ŏl·ō·gy", "Archaeology"));
+        assert!(!pron_echoes_headword("(h)ɛ.lo", "hello"));
+        // An empty pronunciation is not treated as an echo.
+        assert!(!pron_echoes_headword("", "Hello"));
+    }
+
+    #[test]
+    fn one_line_entry_drops_headword_and_pronunciation() {
+        // Header and definition share a line: drop just the `word \respelling\`
+        // prefix so the definition (and its part of speech) survive.
+        let raw = "cecal \\cecal\\ adj. of, pertaining to, or like the cecum.\n   [1913 Webster]\n";
+        let parsed = parse_entry(raw);
+        assert_eq!(parsed.senses.len(), 1);
+        assert_eq!(
+            parsed.senses[0].body,
+            "adj. of, pertaining to, or like the cecum."
+        );
+    }
+
+    #[test]
+    fn snippet_skips_headword_for_unnumbered_entry() {
+        // The result-list preview agrees with the card body: no repeated headword
+        // or `\respelling\` pronunciation, just the definition.
+        let raw = "cecal \\cecal\\ adj. of, pertaining to, or like the cecum.\n";
+        assert_eq!(
+            make_snippet(raw, "cecal"),
+            "adj. of, pertaining to, or like the cecum."
+        );
     }
 
     #[test]
