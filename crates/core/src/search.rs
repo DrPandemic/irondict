@@ -4,6 +4,7 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
+use rayon::prelude::*;
 use tantivy::collector::TopDocs;
 use tantivy::query::{
     BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, Query, RegexQuery, TermQuery,
@@ -301,23 +302,34 @@ impl SearchEngine {
         if query.is_empty() {
             return Ok(Vec::new());
         }
-        let targets = self
+        let targets: Vec<&DictIndex> = self
             .indexes
             .iter()
-            .filter(|idx| dictionary.is_none_or(|name| idx.name == name));
+            .filter(|idx| dictionary.is_none_or(|name| idx.name == name))
+            .collect();
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
 
         if mode == SearchMode::Fuzzy {
             // Each index contributes its closest candidates (with their true edit
             // distance); merge and re-rank globally so the order matches what a
-            // single shared index would have produced. See [`fuzzy_candidates`].
+            // single shared index would have produced. Searched in parallel across
+            // the per-dict indexes.
             let lower = fold(query);
             let len = lower.chars().count();
             let max_distance: u8 = if len <= 1 { 0 } else { 2 };
             let first = lower.chars().next();
-            let mut scored: Vec<(usize, usize, SearchHit)> = Vec::new();
-            for idx in targets {
-                idx.fuzzy_candidates(&lower, max_distance, first, limit, &mut scored)?;
-            }
+            let mut scored: Vec<(usize, usize, SearchHit)> = targets
+                .par_iter()
+                .try_fold(Vec::new, |mut acc, idx| {
+                    idx.fuzzy_candidates(&lower, max_distance, first, limit, &mut acc)?;
+                    Ok::<_, Error>(acc)
+                })
+                .try_reduce(Vec::new, |mut a, b| {
+                    a.extend(b);
+                    Ok::<_, Error>(a)
+                })?;
             // Closest first, then shorter headwords, then alphabetical for stability.
             scored.sort_by(|a, b| {
                 a.0.cmp(&b.0)
@@ -329,10 +341,16 @@ impl SearchEngine {
 
         debug_assert_eq!(mode, SearchMode::Prefix);
         let folded = fold(query);
-        let mut hits = Vec::new();
-        for idx in targets {
-            idx.prefix_hits(&folded, limit, &mut hits)?;
-        }
+        let mut hits: Vec<SearchHit> = targets
+            .par_iter()
+            .try_fold(Vec::new, |mut acc, idx| {
+                idx.prefix_hits(&folded, limit, &mut acc)?;
+                Ok::<_, Error>(acc)
+            })
+            .try_reduce(Vec::new, |mut a, b| {
+                a.extend(b);
+                Ok::<_, Error>(a)
+            })?;
         // Prefix/exact are constant-scored, so impose a deterministic order in
         // Rust (shared by every front-end): exact accent-and-case match first,
         // then accent-insensitive exact, then shortest completion, then alpha.

@@ -2726,6 +2726,7 @@ name = "irondict-core"
 version = "0.6.0"
 dependencies = [
  "directories",
+ "rayon",
  "ruzstd",
  "serde",
  "stardict",
