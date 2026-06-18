@@ -1031,6 +1031,9 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
                                     if let Some(companion) = download::catalog()
                                         .get(index)
                                         .and_then(|e| download::companion_for(e.id))
+                                        // Skip companions not yet published as a
+                                        // catalog asset (e.g. en-conj/it-conj).
+                                        .filter(|c| download::find(c).is_some())
                                         .filter(|c| !download::is_installed(c))
                                     {
                                         spawn_install(None, companion.to_string(), dl_tx.clone());
@@ -1519,7 +1522,7 @@ fn pretty_dict_name(name: &str) -> String {
 }
 
 fn is_companion_dict(path: &std::path::Path) -> bool {
-    path.to_string_lossy().contains("/fr-conj/")
+    download::path_is_companion(path)
 }
 
 /// A plain-message page (no entry): a "Preparing…" / "No results" / error notice.
@@ -1669,37 +1672,23 @@ fn compute_page(
     }
 }
 
-/// Compute `headword`'s conjugation, sourcing from the companion French
-/// conjugation dictionary when it is installed, falling back to the current
-/// entry's text otherwise.
+/// Compute `headword`'s conjugation, sourcing from the conjugation companion
+/// for the source dictionary's language when it is installed, falling back to
+/// the current entry's text otherwise.
 fn compute_conjugation(
     manager: &mut DictionaryManager,
     headword: &str,
     raw: &str,
     source: &str,
 ) -> Vec<RenderedConjSection> {
-    let companion_text = if let Ok(results) = manager.lookup(headword) {
-        results
-            .into_iter()
-            .find(|r| r.dictionary == "Conjugaison — Français")
-            .map(|r| {
-                r.entries
-                    .iter()
-                    .flat_map(|e| e.segments.iter())
-                    .map(|s| s.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-    } else {
-        None
-    };
-
     let language = manager
         .dictionaries()
         .iter()
         .find(|d| d.name() == source)
         .map(|d| d.language)
         .unwrap_or(Language::Auto);
+
+    let companion_text = manager.companion_text(headword, language);
 
     let def = companion_text
         .as_deref()

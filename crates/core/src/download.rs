@@ -143,15 +143,64 @@ pub fn uninstall(id: &str) -> Result<(), Error> {
     }
 }
 
+/// Conjugation companions: each primary dictionary id paired with its hidden
+/// conjugation-companion id and the language the two share. Drives companion
+/// auto-install/uninstall (the companion follows its primary) and conjugation
+/// text sourcing ([`DictionaryManager::companion_text`]).
+///
+/// A companion may be listed here before its catalog entry / upstream release
+/// asset exists (English and Italian land their parsers first — see PLAN.md
+/// Phases 1–2); call sites guard on [`find`] so a not-yet-published companion is
+/// a no-op rather than a failed download.
+///
+/// [`DictionaryManager::companion_text`]: crate::DictionaryManager::companion_text
+const COMPANIONS: &[(&str, &str, Language)] = &[
+    ("fr-fr", "fr-conj", Language::French),
+    ("en-en", "en-conj", Language::English),
+    ("it-it", "it-conj", Language::Italian),
+];
+
+/// The conjugation-companion id for a primary dictionary id, if any
+/// (e.g. `"fr-fr"` → `"fr-conj"`).
 pub fn companion_for(id: &str) -> Option<&'static str> {
-    match id {
-        "fr-fr" => Some("fr-conj"),
-        _ => None,
-    }
+    COMPANIONS
+        .iter()
+        .find(|(primary, _, _)| *primary == id)
+        .map(|(_, companion, _)| *companion)
 }
 
+/// The primary dictionary id for a conjugation-companion id, if any
+/// (e.g. `"fr-conj"` → `"fr-fr"`).
+pub fn primary_for(id: &str) -> Option<&'static str> {
+    COMPANIONS
+        .iter()
+        .find(|(_, companion, _)| *companion == id)
+        .map(|(primary, _, _)| *primary)
+}
+
+/// The conjugation-companion id for a language, if one is defined
+/// (e.g. [`Language::French`] → `"fr-conj"`).
+pub fn companion_for_language(language: Language) -> Option<&'static str> {
+    COMPANIONS
+        .iter()
+        .find(|(_, _, lang)| *lang == language)
+        .map(|(_, companion, _)| *companion)
+}
+
+/// Whether `id` is a conjugation companion (a hidden, auto-paired dictionary).
 pub fn is_companion(id: &str) -> bool {
-    id == "fr-conj"
+    COMPANIONS.iter().any(|(_, companion, _)| *companion == id)
+}
+
+/// Whether `path` points at an installed conjugation companion, matched by the
+/// companion id segment in its install path (e.g. `.../fr-conj/...`). Installed
+/// dictionaries live under `dictionaries_dir()/<id>/`, so the id is always a
+/// path segment.
+pub fn path_is_companion(path: &Path) -> bool {
+    let path = path.to_string_lossy();
+    COMPANIONS
+        .iter()
+        .any(|(_, companion, _)| path.contains(&format!("/{companion}/")))
 }
 
 fn find_ifo(dir: &Path) -> Option<PathBuf> {
@@ -256,4 +305,38 @@ pub fn install(entry: &CatalogEntry, progress: impl FnMut(Progress)) -> Result<P
     fs::rename(&tmp, &dir)?;
 
     Ok(dir.join(ifo_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn companion_mapping_round_trips_for_all_languages() {
+        for (primary, companion, language) in
+            [("fr-fr", "fr-conj", Language::French), ("en-en", "en-conj", Language::English),
+             ("it-it", "it-conj", Language::Italian)]
+        {
+            assert_eq!(companion_for(primary), Some(companion));
+            assert_eq!(primary_for(companion), Some(primary));
+            assert_eq!(companion_for_language(language), Some(companion));
+            assert!(is_companion(companion));
+            assert!(!is_companion(primary));
+        }
+    }
+
+    #[test]
+    fn non_companion_ids_have_no_mapping() {
+        assert_eq!(companion_for("de-de"), None);
+        assert_eq!(primary_for("de-de"), None);
+        assert_eq!(companion_for_language(Language::Auto), None);
+        assert!(!is_companion("en-en"));
+    }
+
+    #[test]
+    fn path_is_companion_matches_install_segment() {
+        assert!(path_is_companion(Path::new("/data/dictionaries/fr-conj/x.ifo")));
+        assert!(path_is_companion(Path::new("/data/dictionaries/it-conj/x.ifo")));
+        assert!(!path_is_companion(Path::new("/data/dictionaries/fr-fr/x.ifo")));
+    }
 }

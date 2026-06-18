@@ -243,6 +243,37 @@ impl DictionaryManager {
         Ok(Vec::new())
     }
 
+    /// Return the entry text of `headword`'s conjugation companion for
+    /// `language`, if that companion dictionary is installed and enabled. The
+    /// companion is the one whose catalog id maps to `language` (e.g. French →
+    /// `fr-conj`); it is identified among the loaded dictionaries by its
+    /// install-dir id segment in the path (`.../fr-conj/...`), the same way the
+    /// front-ends hide companions from the dictionary list.
+    ///
+    /// Returns `None` when `language` has no companion, none is installed, or the
+    /// companion has no entry for `headword`. Front-ends use this to source a
+    /// full conjugation table, falling back to the primary entry's own text.
+    pub fn companion_text(&mut self, headword: &str, language: Language) -> Option<String> {
+        let companion_id = crate::download::companion_for_language(language)?;
+        let segment = format!("/{companion_id}/");
+        let name = self
+            .dicts
+            .iter()
+            .find(|d| d.enabled && d.path.to_string_lossy().contains(&segment))
+            .map(|d| d.dictionary.info.name.clone())?;
+        let entries = self.lookup_in(&name, headword).ok()?;
+        if entries.is_empty() {
+            return None;
+        }
+        let text = entries
+            .iter()
+            .flat_map(|e| e.segments.iter())
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(text)
+    }
+
     /// Visit every entry of the enabled dictionary loaded from `path`, calling
     /// `f` per entry. Used to (re)build that dictionary's own search index
     /// without touching the others (per-dict indexing — PLAN.md §1a), so an

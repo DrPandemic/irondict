@@ -1,6 +1,28 @@
+mod common;
+
 use std::path::{Path, PathBuf};
 
+use common::TempDir;
 use irondict_core::{bundled_gcide_config, Config, DictionaryConfig, DictionaryManager, Language};
+
+/// Write a one-entry StarDict (`sametypesequence=m`) into `dir` and return the
+/// `.ifo` path. Mirrors the helper in `search_test.rs`.
+fn build_stardict(dir: &Path, name: &str, word: &str, def: &str) -> PathBuf {
+    let mut idx = Vec::new();
+    idx.extend_from_slice(word.as_bytes());
+    idx.push(0);
+    idx.extend_from_slice(&0u32.to_be_bytes());
+    idx.extend_from_slice(&(def.len() as u32).to_be_bytes());
+    let ifo = format!(
+        "version=3.0.0\nbookname={name}\nwordcount=1\nidxfilesize={}\nsametypesequence=m\n",
+        idx.len()
+    );
+    std::fs::write(dir.join(format!("{name}.idx")), &idx).unwrap();
+    std::fs::write(dir.join(format!("{name}.dict")), def.as_bytes()).unwrap();
+    let ifo_path = dir.join(format!("{name}.ifo"));
+    std::fs::write(&ifo_path, ifo).unwrap();
+    ifo_path
+}
 
 fn mini_path() -> PathBuf {
     Path::new(concat!(
@@ -145,4 +167,37 @@ fn add_bundled_gcide() {
     assert_eq!(mgr.dictionaries().len(), 1);
     let results = mgr.lookup("dictionary").unwrap();
     assert_eq!(results[0].dictionary, "dictd_www.dict.org_gcide");
+}
+
+#[test]
+fn companion_text_sources_the_installed_companion() {
+    // The companion is identified by its install-dir id segment, so the
+    // dictionary must live under a `fr-conj/` directory.
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("fr-conj");
+    std::fs::create_dir_all(&dir).unwrap();
+    let ifo = build_stardict(&dir, "Conjugaison", "parler", "je parle, tu parles");
+
+    let mut mgr = DictionaryManager::new();
+    mgr.add(&ifo).unwrap();
+    mgr.set_language("Conjugaison", Language::French);
+
+    // Installed + enabled + matching language: returns the entry text.
+    assert_eq!(
+        mgr.companion_text("parler", Language::French).as_deref(),
+        Some("je parle, tu parles")
+    );
+    // No companion for a language without one.
+    assert_eq!(mgr.companion_text("parler", Language::English), None);
+    // No entry for an unknown headword.
+    assert_eq!(mgr.companion_text("manger", Language::French), None);
+}
+
+#[test]
+fn companion_text_is_none_when_no_companion_installed() {
+    // A plain (non-companion) dictionary path never matches.
+    let mut mgr = DictionaryManager::new();
+    mgr.add(mini_path()).unwrap();
+    mgr.set_language("mini", Language::French);
+    assert_eq!(mgr.companion_text("hello", Language::French), None);
 }

@@ -238,16 +238,23 @@ fn conjugate(verb: &str, lang: Option<Language>) -> Result<()> {
 
     let reg = ConjugatorRegistry::new();
     let conjugation = match lang {
-        // Forced language: parse from any available definition (or none).
+        // Forced language: prefer that language's conjugation companion text,
+        // falling back to any available definition (or none).
         Some(forced) => {
-            let def = definitions.first().map(|(_, t)| t.as_str());
+            let companion = manager.companion_text(verb, forced);
+            let def = companion
+                .as_deref()
+                .or_else(|| definitions.first().map(|(_, t)| t.as_str()));
             reg.conjugate(verb, def, forced)
         }
-        // Auto: try each dictionary's definition under its pinned language and
+        // Auto: try each dictionary under its pinned language, preferring that
+        // language's companion text over the dictionary's own definition, and
         // accept the first recognized verb.
-        None => definitions
-            .iter()
-            .find_map(|(dl, text)| reg.conjugate(verb, Some(text), *dl)),
+        None => definitions.iter().find_map(|(dl, text)| {
+            let companion = manager.companion_text(verb, *dl);
+            let def = companion.as_deref().or(Some(text.as_str()));
+            reg.conjugate(verb, def, *dl)
+        }),
     };
 
     match conjugation {
