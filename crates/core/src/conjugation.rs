@@ -20,11 +20,14 @@ use crate::config::Language;
 
 mod english;
 mod french;
+mod italian;
+mod table;
 #[cfg(test)]
 mod tests;
 
 pub use english::EnglishConjugator;
 pub use french::FrenchConjugator;
+pub use italian::ItalianConjugator;
 
 /// One inflected form, e.g. `("je", "parle")` or `("past participle", "gone")`.
 /// The `label` is the person/role tag and may be empty for unlabeled forms.
@@ -91,13 +94,14 @@ impl Default for ConjugatorRegistry {
 }
 
 impl ConjugatorRegistry {
-    /// A registry with all built-in backends (English + French), each of which
-    /// parses conjugation out of the dictionary entry it is handed.
+    /// A registry with all built-in backends (English, French, Italian), each of
+    /// which parses conjugation out of the dictionary entry it is handed.
     pub fn new() -> Self {
         Self {
             backends: vec![
                 Box::new(EnglishConjugator::new()),
                 Box::new(FrenchConjugator::new()),
+                Box::new(ItalianConjugator::new()),
             ],
         }
     }

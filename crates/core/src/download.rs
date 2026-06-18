@@ -63,9 +63,9 @@ macro_rules! entry {
 }
 
 /// The built-in catalog of downloadable dictionaries: the monolingual
-/// Wiktionary editions published by xxyzz, plus the French conjugation
-/// companion. Sizes are the compressed download as of the 2026-06-08 snapshot
-/// and are approximate.
+/// Wiktionary editions published by xxyzz, plus the French and Italian
+/// conjugation companions. Sizes are the compressed download as of the
+/// 2026-06-08 snapshot and are approximate.
 pub fn catalog() -> &'static [CatalogEntry] {
     use Language::{Auto, English, French};
     &[
@@ -78,6 +78,7 @@ pub fn catalog() -> &'static [CatalogEntry] {
         entry!("sv-sv", "Wiktionary — Svenska", Auto, 10_000_000),
         CATALOG_IT_IT,
         CATALOG_FR_CONJ,
+        CATALOG_IT_CONJ,
     ]
 }
 
@@ -97,6 +98,16 @@ const CATALOG_FR_CONJ: CatalogEntry = CatalogEntry {
     language: Language::French,
     url: "https://github.com/DrPandemic/wikitionary-dictionaries/releases/latest/download/fr-conj-dictzip.tar.zst",
     approx_size: 12_000_000,
+    license: LICENSE,
+    source: "Wiktionary via kaikki.org / wiktextract",
+};
+
+const CATALOG_IT_CONJ: CatalogEntry = CatalogEntry {
+    id: "it-conj",
+    label: "Coniugazione — Italiano",
+    language: Language::Italian,
+    url: "https://github.com/DrPandemic/wikitionary-dictionaries/releases/latest/download/it-conj-dictzip.tar.zst",
+    approx_size: 2_000_000,
     license: LICENSE,
     source: "Wiktionary via kaikki.org / wiktextract",
 };

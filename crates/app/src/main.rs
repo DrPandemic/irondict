@@ -120,6 +120,7 @@ impl From<Mode> for SearchMode {
 enum Lang {
     En,
     Fr,
+    It,
 }
 
 impl From<Lang> for Language {
@@ -127,6 +128,7 @@ impl From<Lang> for Language {
         match lang {
             Lang::En => Language::English,
             Lang::Fr => Language::French,
+            Lang::It => Language::Italian,
         }
     }
 }

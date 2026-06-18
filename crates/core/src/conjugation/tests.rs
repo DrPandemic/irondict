@@ -169,6 +169,54 @@ fn french_conj_companion_html_strips_and_parses() {
     assert_eq!(conj.sections[1].label, "Indicatif imparfait");
 }
 
+#[test]
+fn italian_conj_companion_html_strips_and_parses() {
+    // The shape the `it-conj` pipeline emits: bold Mood-tense headings, then
+    // `<br>`-separated pronoun-prefixed forms.
+    let text = concat!(
+        "<b>Indicativo presente</b><br>io parlo<br>tu parli<br>egli parla<br>",
+        "noi parliamo<br>voi parlate<br>essi parlano<br>",
+        "<b>Indicativo imperfetto</b><br>io parlavo<br>tu parlavi<br>egli parlava<br>",
+        "noi parlavamo<br>voi parlavate<br>essi parlavano<br>",
+        "<b>Participio passato</b><br>parlato<br>",
+    );
+    let c = ItalianConjugator::new();
+    let conj = c
+        .conjugate("parlare", Some(text), true)
+        .expect("should parse companion HTML");
+    assert_eq!(conj.language, Language::Italian);
+    assert_eq!(conj.sections[0].label, "Indicativo presente");
+    assert_eq!(conj.sections[0].forms.len(), 6);
+    assert_eq!(conj.sections[0].forms[0].text, "parlo");
+    assert_eq!(conj.sections[0].forms[0].label, "io");
+    assert_eq!(conj.sections[1].label, "Indicativo imperfetto");
+}
+
+#[test]
+fn italian_declines_ordinary_prose() {
+    // A definition that merely mentions tenses must not be taken for a table.
+    let prose = "parlare: v. Il presente indicativo è regolare. Coniugazione: modello 1.";
+    let c = ItalianConjugator::new();
+    assert!(c.conjugate("parlare", Some(prose), true).is_none());
+}
+
+#[test]
+fn italian_routes_through_registry() {
+    let text = concat!(
+        "<b>Indicativo presente</b><br>io temo<br>tu temi<br>egli teme<br>",
+        "noi temiamo<br>voi temete<br>essi temono<br>",
+        "<b>Congiuntivo presente</b><br>io tema<br>tu tema<br>egli tema<br>",
+        "noi temiamo<br>voi temiate<br>essi temano<br>",
+    );
+    let reg = ConjugatorRegistry::new();
+    let conj = reg
+        .conjugate("temere", Some(text), Language::Italian)
+        .unwrap();
+    assert_eq!(conj.language, Language::Italian);
+    assert_eq!(conj.sections.len(), 2);
+    assert_eq!(conj.sections[1].label, "Congiuntivo presente");
+}
+
 fn by_label<'a>(forms: &'a [ConjForm], label: &str) -> &'a str {
     forms
         .iter()

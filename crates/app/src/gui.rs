@@ -1806,6 +1806,7 @@ fn apply_conjugation(ui: &AppWindow, sections: &[RenderedConjSection]) {
 /// parts") forms its own tab.
 fn conj_group(label: &str) -> &str {
     const MOODS: &[&str] = &[
+        // French
         "Indicatif",
         "Subjonctif",
         "Conditionnel",
@@ -1813,6 +1814,14 @@ fn conj_group(label: &str) -> &str {
         "Infinitif",
         "Gérondif",
         "Participe",
+        // Italian
+        "Indicativo",
+        "Congiuntivo",
+        "Condizionale",
+        "Imperativo",
+        "Infinito",
+        "Gerundio",
+        "Participio",
     ];
     MOODS
         .iter()
