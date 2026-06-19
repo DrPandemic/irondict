@@ -143,9 +143,12 @@ fn main() -> Result<()> {
     match cli.command {
         Some(Command::Lookup { word }) => lookup(&word),
         Some(Command::Conjugate { verb, lang }) => conjugate(&verb, lang.map(Into::into)),
-        Some(Command::Search { query, mode, limit, dict }) => {
-            run_search(&query, mode.into(), limit, dict.as_deref())
-        }
+        Some(Command::Search {
+            query,
+            mode,
+            limit,
+            dict,
+        }) => run_search(&query, mode.into(), limit, dict.as_deref()),
         Some(Command::Add { path }) => add(path),
         Some(Command::Catalog) => catalog(),
         Some(Command::Install { id }) => install(&id),
@@ -390,7 +393,11 @@ fn install(id: &str) -> Result<()> {
             let pct = (received * 100 / total) as u8;
             if pct != last_pct {
                 last_pct = pct;
-                eprint!("\r  {pct:>3}%  ({} / {})", human_size(received), human_size(total));
+                eprint!(
+                    "\r  {pct:>3}%  ({} / {})",
+                    human_size(received),
+                    human_size(total)
+                );
             }
         }
     })
@@ -406,7 +413,10 @@ fn install(id: &str) -> Result<()> {
     manager.set_language(&name, entry.language);
     save_manager(&manager)?;
 
-    println!("Installed \"{name}\" ({word_count} words) at {}", ifo.display());
+    println!(
+        "Installed \"{name}\" ({word_count} words) at {}",
+        ifo.display()
+    );
     Ok(())
 }
 

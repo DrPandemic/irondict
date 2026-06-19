@@ -1,22 +1,18 @@
-//! English conjugation, sourced from GCIDE.
+//! English conjugation — generated periphrastic grid from a bundled
+//! irregular-verb table and regular spelling rules.
 //!
-//! GCIDE verb entries annotate their principal parts right after the
-//! part-of-speech, in a bracketed inflection block, e.g.
-//!
-//! ```text
-//! Go \Go\, v. i. [imp. {Went}; p. p. {Gone}; p. pr. & vb. n. {Going}. ...]
-//! ```
-//!
-//! where `imp.` is the past, `p. p.` the past participle, and `p. pr. & vb. n.`
-//! the present participle. Those authoritative forms win. Verbs GCIDE didn't
-//! annotate (regulars like *stop*) fall back to in-code spelling rules. The
-//! third-person-singular present is always rule-generated (GCIDE rarely lists it).
+//! English has only four inflected principal parts: 3sg present (`goes`),
+//! simple past (`went`), past participle (`gone`), present participle
+//! (`going`).  The entire rest of the grid (`I have gone`, `he would have
+//! been working`) is **periphrastic** — mechanical combinations of auxiliary
+//! + non-finite form. This module generates the full grid in-code from the
+//! principal parts.
 
 use super::{ConjForm, ConjSection, Conjugation, Conjugator};
 use crate::config::Language;
 
-/// Conjugates English verbs by reading GCIDE's inflection block, filling any
-/// gaps with regular spelling rules.
+/// Conjugates English verbs from an in-code irregular table and regular
+/// spelling rules, producing the full periphrastic grid.
 #[derive(Debug, Default)]
 pub struct EnglishConjugator;
 
@@ -42,55 +38,428 @@ impl Conjugator for EnglishConjugator {
             return None;
         }
 
-        // Pull authoritative forms from GCIDE's inflection block, if present.
-        let parsed = definition.and_then(parse_inflection_block);
-        let is_verb = parsed.is_some() || definition.is_some_and(has_verb_pos);
+        let in_irregular = irregular_verb(&base).is_some();
+        let has_pos = definition.is_some_and(has_verb_pos);
+        let is_verb = in_irregular || has_pos;
 
-        // During `Auto` routing (force == false) we only claim the word when the
-        // dictionary shows it is a verb, so we don't shadow other languages.
         if !force && !is_verb {
             return None;
         }
 
-        let parsed = parsed.unwrap_or_default();
-        let third = regular_third_singular(&base);
-        let past = parsed.past.unwrap_or_else(|| regular_past(&base));
-        let past_part = parsed
-            .past_participle
-            .or_else(|| Some(regular_past(&base)))
-            .unwrap();
-        let pres_part = parsed
-            .present_participle
-            .unwrap_or_else(|| regular_present_participle(&base));
+        let (irr_past, irr_past_part) = irregular_verb(&base).unwrap_or(("", ""));
+        let is_be = base == "be";
 
-        let forms = vec![
-            ConjForm::new("present (he/she/it)", third),
-            ConjForm::new("past", past),
-            ConjForm::new("past participle", past_part),
-            ConjForm::new("present participle", pres_part),
-        ];
+        let third = regular_third_singular(&base);
+        let pres_part = regular_present_participle(&base);
+
+        let past = if irr_past.is_empty() {
+            regular_past(&base)
+        } else {
+            irr_past.to_string()
+        };
+
+        // An empty irregular past participle means it coincides with the past
+        // (e.g. `bend` → bent/bent, `buy` → bought/bought); regular verbs reach
+        // the same fall-through since their `past` is already the regular form.
+        let past_part = if irr_past_part.is_empty() {
+            past.clone()
+        } else {
+            irr_past_part.to_string()
+        };
+
+        let sections = build_grid(&base, &third, &past, &past_part, &pres_part, is_be);
 
         Some(Conjugation {
             language: Language::English,
             infinitive: base,
-            sections: vec![ConjSection {
-                label: "Principal parts".to_string(),
-                forms,
-            }],
+            sections,
         })
     }
 }
 
-/// The principal parts read out of a GCIDE inflection block.
-#[derive(Debug, Default)]
-struct ParsedParts {
-    past: Option<String>,
-    past_participle: Option<String>,
-    present_participle: Option<String>,
+// --- Grid builder ------------------------------------------------------------
+
+const PERSONS: &[&str] = &["I", "you", "he/she/it", "we", "they"];
+
+fn build_grid(
+    base: &str,
+    third: &str,
+    past: &str,
+    past_part: &str,
+    pres_part: &str,
+    is_be: bool,
+) -> Vec<ConjSection> {
+    let mut s = Vec::with_capacity(17);
+
+    // -- Indicative (12 sections) ------------------------------------------
+
+    // Simple present
+    s.push(person_section("Indicative present", |p| {
+        if is_be {
+            aux_be_present(p).to_string()
+        } else if p == "he/she/it" {
+            third.to_string()
+        } else {
+            base.to_string()
+        }
+    }));
+
+    // Simple past
+    s.push(person_section("Indicative past", |p| {
+        if is_be {
+            aux_be_past(p).to_string()
+        } else {
+            past.to_string()
+        }
+    }));
+
+    // Simple future
+    s.push(fixed_aux_section("Indicative future", "will", base));
+
+    // Present continuous
+    s.push(varying_aux_section(
+        "Indicative present continuous",
+        aux_be_present,
+        pres_part,
+    ));
+
+    // Past continuous
+    s.push(varying_aux_section(
+        "Indicative past continuous",
+        aux_be_past,
+        pres_part,
+    ));
+
+    // Future continuous
+    s.push(fixed_aux_section(
+        "Indicative future continuous",
+        "will be",
+        pres_part,
+    ));
+
+    // Present perfect
+    s.push(varying_aux_section(
+        "Indicative present perfect",
+        aux_have,
+        past_part,
+    ));
+
+    // Past perfect
+    s.push(fixed_aux_section(
+        "Indicative past perfect",
+        "had",
+        past_part,
+    ));
+
+    // Future perfect
+    s.push(fixed_aux_section(
+        "Indicative future perfect",
+        "will have",
+        past_part,
+    ));
+
+    // Present perfect continuous
+    s.push(varying_aux_section(
+        "Indicative present perfect continuous",
+        |p| format!("{} been", aux_have(p)),
+        pres_part,
+    ));
+
+    // Past perfect continuous
+    s.push(fixed_aux_section(
+        "Indicative past perfect continuous",
+        "had been",
+        pres_part,
+    ));
+
+    // Future perfect continuous
+    s.push(fixed_aux_section(
+        "Indicative future perfect continuous",
+        "will have been",
+        pres_part,
+    ));
+
+    // -- Conditional (4 sections) -------------------------------------------
+
+    s.push(fixed_aux_section("Conditional", "would", base));
+    s.push(fixed_aux_section(
+        "Conditional continuous",
+        "would be",
+        pres_part,
+    ));
+    s.push(fixed_aux_section(
+        "Conditional perfect",
+        "would have",
+        past_part,
+    ));
+    s.push(fixed_aux_section(
+        "Conditional perfect continuous",
+        "would have been",
+        pres_part,
+    ));
+
+    // -- Non-finite ---------------------------------------------------------
+
+    s.push(ConjSection {
+        label: "Non-finite".to_string(),
+        forms: vec![
+            ConjForm::new("infinitive", format!("to {base}")),
+            ConjForm::new("present participle", pres_part.to_string()),
+            ConjForm::new("past participle", past_part.to_string()),
+        ],
+    });
+
+    s
 }
 
+fn person_section(label: &str, text_for: impl Fn(&str) -> String) -> ConjSection {
+    ConjSection {
+        label: label.to_string(),
+        forms: PERSONS
+            .iter()
+            .map(|&p| ConjForm::new(p, text_for(p)))
+            .collect(),
+    }
+}
+
+fn varying_aux_section<S: AsRef<str>>(
+    label: &str,
+    aux: impl Fn(&str) -> S,
+    main: &str,
+) -> ConjSection {
+    person_section(label, |p| format!("{} {main}", aux(p).as_ref()))
+}
+
+fn fixed_aux_section(label: &str, aux: &str, main: &str) -> ConjSection {
+    ConjSection {
+        label: label.to_string(),
+        forms: PERSONS
+            .iter()
+            .map(|&p| ConjForm::new(p, format!("{aux} {main}")))
+            .collect(),
+    }
+}
+
+// --- Auxiliary tables -------------------------------------------------------
+
+fn aux_be_present(person: &str) -> &'static str {
+    match person {
+        "I" => "am",
+        "he/she/it" => "is",
+        _ => "are",
+    }
+}
+
+fn aux_be_past(person: &str) -> &'static str {
+    match person {
+        "I" | "he/she/it" => "was",
+        _ => "were",
+    }
+}
+
+fn aux_have(person: &str) -> &'static str {
+    match person {
+        "he/she/it" => "has",
+        _ => "have",
+    }
+}
+
+// --- Irregular-verb table ---------------------------------------------------
+//
+// Maps base → (past, past_participle).  Only ~200 irregulars; everything else
+// is covered by the regular spelling rules.  The past participle may be empty
+// when it coincides with the past form — the caller falls back to the regular
+// past (which is also the regular past participle).
+
+fn irregular_verb(base: &str) -> Option<(&'static str, &'static str)> {
+    let v = match base {
+        "arise" => ("arose", "arisen"),
+        "awake" => ("awoke", "awoken"),
+        "be" => ("was", "been"),
+        "bear" => ("bore", "borne"),
+        "beat" => ("beat", "beaten"),
+        "become" => ("became", "become"),
+        "begin" => ("began", "begun"),
+        "bend" => ("bent", ""),
+        "bet" => ("bet", ""),
+        "bid" => ("bid", ""),
+        "bind" => ("bound", ""),
+        "bite" => ("bit", "bitten"),
+        "bleed" => ("bled", ""),
+        "blow" => ("blew", "blown"),
+        "break" => ("broke", "broken"),
+        "breed" => ("bred", ""),
+        "bring" => ("brought", ""),
+        "broadcast" => ("broadcast", ""),
+        "build" => ("built", ""),
+        "burn" => ("burnt", ""),
+        "burst" => ("burst", ""),
+        "buy" => ("bought", ""),
+        "cast" => ("cast", ""),
+        "catch" => ("caught", ""),
+        "choose" => ("chose", "chosen"),
+        "cling" => ("clung", ""),
+        "come" => ("came", "come"),
+        "cost" => ("cost", ""),
+        "creep" => ("crept", ""),
+        "cut" => ("cut", ""),
+        "deal" => ("dealt", ""),
+        "dig" => ("dug", ""),
+        "dive" => ("dove", ""),
+        "do" => ("did", "done"),
+        "draw" => ("drew", "drawn"),
+        "dream" => ("dreamt", ""),
+        "drink" => ("drank", "drunk"),
+        "drive" => ("drove", "driven"),
+        "dwell" => ("dwelt", ""),
+        "eat" => ("ate", "eaten"),
+        "fall" => ("fell", "fallen"),
+        "feed" => ("fed", ""),
+        "feel" => ("felt", ""),
+        "fight" => ("fought", ""),
+        "find" => ("found", ""),
+        "flee" => ("fled", ""),
+        "fling" => ("flung", ""),
+        "fly" => ("flew", "flown"),
+        "forbid" => ("forbade", "forbidden"),
+        "forecast" => ("forecast", ""),
+        "foresee" => ("foresaw", "foreseen"),
+        "forget" => ("forgot", "forgotten"),
+        "forgive" => ("forgave", "forgiven"),
+        "forsake" => ("forsook", "forsaken"),
+        "freeze" => ("froze", "frozen"),
+        "get" => ("got", "gotten"),
+        "give" => ("gave", "given"),
+        "go" => ("went", "gone"),
+        "grind" => ("ground", ""),
+        "grow" => ("grew", "grown"),
+        "hang" => ("hung", ""),
+        "have" => ("had", ""),
+        "hear" => ("heard", ""),
+        "hide" => ("hid", "hidden"),
+        "hit" => ("hit", ""),
+        "hold" => ("held", ""),
+        "hurt" => ("hurt", ""),
+        "keep" => ("kept", ""),
+        "kneel" => ("knelt", ""),
+        "knit" => ("knit", ""),
+        "know" => ("knew", "known"),
+        "lay" => ("laid", ""),
+        "lead" => ("led", ""),
+        "lean" => ("leant", ""),
+        "leap" => ("leapt", ""),
+        "learn" => ("learnt", ""),
+        "leave" => ("left", ""),
+        "lend" => ("lent", ""),
+        "let" => ("let", ""),
+        "lie" => ("lay", "lain"),
+        "light" => ("lit", ""),
+        "lose" => ("lost", ""),
+        "make" => ("made", ""),
+        "mean" => ("meant", ""),
+        "meet" => ("met", ""),
+        "mistake" => ("mistook", "mistaken"),
+        "misunderstand" => ("misunderstood", ""),
+        "overcome" => ("overcame", "overcome"),
+        "overtake" => ("overtook", "overtaken"),
+        "pay" => ("paid", ""),
+        "plead" => ("pled", ""),
+        "prove" => ("proved", "proven"),
+        "put" => ("put", ""),
+        "quit" => ("quit", ""),
+        "read" => ("read", ""),
+        "repay" => ("repaid", ""),
+        "ride" => ("rode", "ridden"),
+        "ring" => ("rang", "rung"),
+        "rise" => ("rose", "risen"),
+        "run" => ("ran", "run"),
+        "saw" => ("sawed", "sawn"),
+        "say" => ("said", ""),
+        "see" => ("saw", "seen"),
+        "seek" => ("sought", ""),
+        "sell" => ("sold", ""),
+        "send" => ("sent", ""),
+        "set" => ("set", ""),
+        "sew" => ("sewed", "sewn"),
+        "shake" => ("shook", "shaken"),
+        "shear" => ("sheared", "shorn"),
+        "shed" => ("shed", ""),
+        "shine" => ("shone", ""),
+        "shoot" => ("shot", ""),
+        "show" => ("showed", "shown"),
+        "shrink" => ("shrank", "shrunk"),
+        "shut" => ("shut", ""),
+        "sing" => ("sang", "sung"),
+        "sink" => ("sank", "sunk"),
+        "sit" => ("sat", ""),
+        "slay" => ("slew", "slain"),
+        "sleep" => ("slept", ""),
+        "slide" => ("slid", ""),
+        "sling" => ("slung", ""),
+        "slit" => ("slit", ""),
+        "smell" => ("smelt", ""),
+        "sow" => ("sowed", "sown"),
+        "speak" => ("spoke", "spoken"),
+        "speed" => ("sped", ""),
+        "spell" => ("spelt", ""),
+        "spend" => ("spent", ""),
+        "spill" => ("spilt", ""),
+        "spin" => ("spun", ""),
+        "spit" => ("spat", ""),
+        "split" => ("split", ""),
+        "spoil" => ("spoilt", ""),
+        "spread" => ("spread", ""),
+        "spring" => ("sprang", "sprung"),
+        "stand" => ("stood", ""),
+        "steal" => ("stole", "stolen"),
+        "stick" => ("stuck", ""),
+        "sting" => ("stung", ""),
+        "stink" => ("stank", "stunk"),
+        "stride" => ("strode", "stridden"),
+        "strike" => ("struck", ""),
+        "string" => ("strung", ""),
+        "strive" => ("strove", "striven"),
+        "swear" => ("swore", "sworn"),
+        "sweep" => ("swept", ""),
+        "swell" => ("swelled", "swollen"),
+        "swim" => ("swam", "swum"),
+        "swing" => ("swung", ""),
+        "take" => ("took", "taken"),
+        "teach" => ("taught", ""),
+        "tear" => ("tore", "torn"),
+        "tell" => ("told", ""),
+        "think" => ("thought", ""),
+        "throw" => ("threw", "thrown"),
+        "thrust" => ("thrust", ""),
+        "tread" => ("trod", "trodden"),
+        "undergo" => ("underwent", "undergone"),
+        "understand" => ("understood", ""),
+        "undertake" => ("undertook", "undertaken"),
+        "undo" => ("undid", "undone"),
+        "upset" => ("upset", ""),
+        "wake" => ("woke", "woken"),
+        "wear" => ("wore", "worn"),
+        "weave" => ("wove", "woven"),
+        "wed" => ("wed", ""),
+        "weep" => ("wept", ""),
+        "wet" => ("wet", ""),
+        "win" => ("won", ""),
+        "wind" => ("wound", ""),
+        "withdraw" => ("withdrew", "withdrawn"),
+        "withhold" => ("withheld", ""),
+        "withstand" => ("withstood", ""),
+        "wring" => ("wrung", ""),
+        "write" => ("wrote", "written"),
+        _ => return None,
+    };
+    Some(v)
+}
+
+// --- Verb part-of-speech detection ------------------------------------------
+
 /// Whether `definition` carries a verb part-of-speech marker (`v.`, `v. t.`,
-/// `v. i.`, …). Used as weak evidence the headword is a verb.
+/// `v. i.`, …).  Used as weak evidence the headword is a verb during `Auto`
+/// routing, so English doesn't shadow other languages for non-verbs.
 fn has_verb_pos(definition: &str) -> bool {
     find_verb_pos(definition).is_some()
 }
@@ -111,123 +480,7 @@ fn find_verb_pos(text: &str) -> Option<usize> {
         .min()
 }
 
-/// Parse GCIDE's inflection block for a verb's principal parts. Returns `None`
-/// when the entry isn't a verb or has no annotated forms.
-fn parse_inflection_block(definition: &str) -> Option<ParsedParts> {
-    let pos_end = find_verb_pos(definition)?;
-    let after = &definition[pos_end..];
-
-    // Scan the bracketed blocks following the POS; the inflection block is the
-    // first one that mentions a principal-part label. (The next block is usually
-    // the etymology, which we skip.) Brackets nest — diacritics like `(w[e^]nt)`
-    // appear inside — so we balance-match each block.
-    let mut rest = after;
-    while let Some(open) = rest.find('[') {
-        let block_start = open + 1;
-        let block = match balanced_bracket(&rest[block_start..]) {
-            Some(end) => &rest[block_start..block_start + end],
-            None => break,
-        };
-        // Advance past this block for the next iteration.
-        let consumed = block_start + block.len() + 1;
-        if block.contains("imp.") || block.contains("p. p.") || block.contains("p. pr.") {
-            return Some(parse_parts(block));
-        }
-        rest = &rest[consumed.min(rest.len())..];
-    }
-    None
-}
-
-/// Given the text just after an opening `[`, return the byte length up to the
-/// matching `]`, accounting for nested brackets. `None` if unbalanced.
-fn balanced_bracket(s: &str) -> Option<usize> {
-    let mut depth = 1usize;
-    for (i, c) in s.char_indices() {
-        match c {
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Pull the principal parts out of one inflection block's text.
-fn parse_parts(block: &str) -> ParsedParts {
-    let mut parts = ParsedParts::default();
-    for seg in block.split(';') {
-        let label = seg.split('{').next().unwrap_or("").to_lowercase();
-        let forms = collect_forms(seg);
-        if forms.is_empty() {
-            continue;
-        }
-        let joined = forms.join(" or ");
-        // `imp. & p. p.` supplies both past and past participle at once.
-        if label.contains("imp.") {
-            parts.past.get_or_insert_with(|| joined.clone());
-        }
-        if label.contains("p. p.") {
-            parts.past_participle.get_or_insert_with(|| joined.clone());
-        }
-        if label.contains("p. pr.") {
-            parts.present_participle.get_or_insert(joined);
-        }
-    }
-    parts
-}
-
-/// Collect and clean the `{...}` forms at the start of a segment, e.g.
-/// `{Ran}or {Run}` → `["ran", "run"]`. Only contiguous "or"/comma-joined
-/// alternatives are taken; once the prose continues (as in `{Going}. ... See
-/// {Wend}`) collection stops, so cross-references aren't mistaken for forms.
-fn collect_forms(seg: &str) -> Vec<String> {
-    let mut forms = Vec::new();
-    let mut rest = seg;
-    while let Some(open) = rest.find('{') {
-        // Only the first form may follow arbitrary label text; later forms must
-        // be joined to the previous one by an "or"/comma connector.
-        if !forms.is_empty() {
-            let gap = rest[..open].trim().to_lowercase();
-            if !matches!(gap.as_str(), "" | "or" | "," | ", or" | "or,") {
-                break;
-            }
-        }
-        let after = &rest[open + 1..];
-        let Some(close) = after.find('}') else { break };
-        let form = clean_form(&after[..close]);
-        if !form.is_empty() {
-            forms.push(form);
-        }
-        rest = &after[close + 1..];
-    }
-    forms
-}
-
-/// Normalize a raw GCIDE form: drop bracketed diacritic codes, collapse
-/// whitespace, lowercase.
-fn clean_form(raw: &str) -> String {
-    let mut out = String::new();
-    let mut depth = 0usize;
-    for c in raw.chars() {
-        match c {
-            '[' | '(' => depth += 1,
-            ']' | ')' => depth = depth.saturating_sub(1),
-            _ if depth == 0 => out.push(c),
-            _ => {}
-        }
-    }
-    out.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
-// --- Regular spelling rules ------------------------------------------------
+// --- Regular spelling rules -------------------------------------------------
 
 fn is_vowel(c: char) -> bool {
     matches!(c, 'a' | 'e' | 'i' | 'o' | 'u')
@@ -236,8 +489,7 @@ fn is_vowel(c: char) -> bool {
 /// Third-person-singular present: `-s`, `-es` after a sibilant/`o`, or `y→ies`.
 ///
 /// English has exactly three suppletive present-tense verbs whose 3sg no
-/// dictionary spells out inline; they are handled here as a grammar rule (not a
-/// bundled verb list).
+/// dictionary spells out inline; they are handled here as a grammar rule.
 fn regular_third_singular(base: &str) -> String {
     match base {
         "be" => return "is".to_string(),

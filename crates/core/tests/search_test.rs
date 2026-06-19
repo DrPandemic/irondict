@@ -132,8 +132,7 @@ fn cancelled_build_yields_no_engine() {
     mgr.add(mini_path()).unwrap();
     let dir = TempDir::new().unwrap();
     // A cancel that fires immediately must abandon the build and commit nothing.
-    let outcome =
-        SearchEngine::build_cancellable(dir.path(), &mut mgr, || true, |_| {}).unwrap();
+    let outcome = SearchEngine::build_cancellable(dir.path(), &mut mgr, || true, |_| {}).unwrap();
     assert!(outcome.is_none());
     // The abandoned index isn't usable; a fresh, uncancelled build still works.
     let engine = SearchEngine::build(dir.path(), &mut mgr).unwrap();
@@ -293,7 +292,11 @@ fn changing_one_dictionary_does_not_rebuild_the_others() {
         );
     }
     // All three are searchable through the merged engine.
-    for (q, want) in [("apple", "apple"), ("banana", "banana"), ("cherry", "cherry")] {
+    for (q, want) in [
+        ("apple", "apple"),
+        ("banana", "banana"),
+        ("cherry", "cherry"),
+    ] {
         let hits = engine.search(q, SearchMode::Prefix, 10).unwrap();
         assert_eq!(hits[0].headword, want);
     }

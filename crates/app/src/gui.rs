@@ -17,9 +17,8 @@ use slint::private_unstable_api::re_exports::{parse_markdown, StyledText};
 use slint::{Color, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use irondict_core::{
-    bundled_gcide_config, download, search, Config, ConjugatorRegistry,
-    DictionaryManager, IndexProgress, Language, Preferences, Progress, SearchEngine, SearchMode,
-    ThemeMode,
+    bundled_gcide_config, download, search, Config, ConjugatorRegistry, DictionaryManager,
+    IndexProgress, Language, Preferences, Progress, SearchEngine, SearchMode, ThemeMode,
 };
 
 /// Preset accent swatches offered in the settings page, in display order. Index
@@ -495,7 +494,15 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
             // `--dict` selected, or none for "All"), so a per-language launcher
             // trigger lands on that dictionary's entry.
             let filter = scope_filter(ui.get_scope(), &manager);
-            navigate(&ui, &manager, &blocks_model, &history, word, "", filter.as_deref());
+            navigate(
+                &ui,
+                &manager,
+                &blocks_model,
+                &history,
+                word,
+                "",
+                filter.as_deref(),
+            );
         }
         None => {
             let (wotm, wotm_src) = word_of_the_moment(&manager, ui.get_scope(), seed);
@@ -1145,13 +1152,19 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
 /// A message from a dictionary-download worker thread back to the UI thread.
 /// `index` is the catalog row being downloaded.
 enum DownloadMsg {
-    Progress { index: Option<usize>, fraction: f32 },
+    Progress {
+        index: Option<usize>,
+        fraction: f32,
+    },
     Done {
         index: Option<usize>,
         ifo: PathBuf,
         language: Language,
     },
-    Failed { index: Option<usize>, error: String },
+    Failed {
+        index: Option<usize>,
+        error: String,
+    },
 }
 
 /// Spawn a worker thread that downloads and installs the catalog dictionary
@@ -1247,7 +1260,10 @@ fn index_status(elapsed: Duration, fraction: f32) -> String {
         return format!("Indexing… {percent}%");
     }
     let remaining = elapsed.as_secs_f32() * (1.0 - fraction) / fraction;
-    format!("Indexing… {percent}% · about {} left", human_duration(remaining))
+    format!(
+        "Indexing… {percent}% · about {} left",
+        human_duration(remaining)
+    )
 }
 
 /// Render a rough seconds estimate as `5 s` / `1 min 20 s`, kept coarse since
@@ -1641,7 +1657,10 @@ fn compute_page(
         .into_iter()
         .map(|b| {
             let (md, text) = if html {
-                (convert_html_refs_to_links(&b.text), strip_link_markers(&b.text))
+                (
+                    convert_html_refs_to_links(&b.text),
+                    strip_link_markers(&b.text),
+                )
             } else {
                 (convert_gcide_refs_to_links(&b.text), b.text)
             };
@@ -1801,11 +1820,15 @@ fn apply_conjugation(ui: &AppWindow, sections: &[RenderedConjSection]) {
     ui.set_show_conjugation(false);
 }
 
-/// The mood tab a conjugation section belongs to. French sections group by mood
-/// (`Indicatif présent` → `Indicatif`); anything else (e.g. English "Principal
-/// parts") forms its own tab.
+/// The mood tab a conjugation section belongs to: sections group by mood
+/// (`Indicatif présent` → `Indicatif`, `Indicative present` → `Indicative`);
+/// any label without a known mood prefix forms its own tab.
 fn conj_group(label: &str) -> &str {
     const MOODS: &[&str] = &[
+        // English
+        "Indicative",
+        "Conditional",
+        "Non-finite",
         // French
         "Indicatif",
         "Subjonctif",
@@ -1981,7 +2004,9 @@ fn sync_nav_state(ui: &AppWindow, history: &Rc<RefCell<NavHistory>>) {
 }
 
 fn clear_conjugation(ui: &AppWindow) {
-    ui.set_conjugation(ModelRc::from(Rc::new(VecModel::from(Vec::<ConjMood>::new()))));
+    ui.set_conjugation(ModelRc::from(Rc::new(VecModel::from(
+        Vec::<ConjMood>::new(),
+    ))));
     ui.set_conj_tab(0);
     ui.set_show_conjugation(false);
 }
@@ -2226,7 +2251,11 @@ fn html_to_blocks(html: &str) -> Vec<HtmlBlock> {
             let mut first = true;
             for piece in split_long(&b.text, 800) {
                 split.push(HtmlBlock {
-                    marker: if first { b.marker.clone() } else { String::new() },
+                    marker: if first {
+                        b.marker.clone()
+                    } else {
+                        String::new()
+                    },
                     text: piece,
                     quote: b.quote,
                     heading: b.heading,
@@ -2407,7 +2436,10 @@ fn extract_html_header(paras: &mut Vec<HtmlBlock>, headword: &str) -> (String, S
     }
 
     // The etymology line, when present, follows the header; lift it as well.
-    let etym = if paras.first().is_some_and(|b| !b.heading && is_etym_line(&b.text)) {
+    let etym = if paras
+        .first()
+        .is_some_and(|b| !b.heading && is_etym_line(&b.text))
+    {
         paras.remove(0).text
     } else {
         String::new()
@@ -2489,7 +2521,6 @@ fn split_numeric_marker(s: &str) -> Option<(String, String)> {
     }
     Some((digits, rest.to_string()))
 }
-
 
 /// The lowercased element name of an HTML tag body (without `<`/`>`), e.g.
 /// `/DIV style="…"` → `div`.
@@ -3090,10 +3121,7 @@ const EMPH_ITAL: char = '\u{E004}';
 
 /// Whether `c` is one of the private-use sentinels (never present in real text).
 fn is_sentinel(c: char) -> bool {
-    matches!(
-        c,
-        LINK_OPEN | LINK_SEP | LINK_CLOSE | EMPH_BOLD | EMPH_ITAL
-    )
+    matches!(c, LINK_OPEN | LINK_SEP | LINK_CLOSE | EMPH_BOLD | EMPH_ITAL)
 }
 
 /// Extract the cross-reference target from an `<a …>` tag whose `href` uses the
@@ -3322,7 +3350,9 @@ mod tests {
         assert_eq!(summary[3].4, 1); // and hangs under its sub-sense
         assert_eq!(example, "She ran home.");
         // The next sibling sub-sense numbers as "b.".
-        assert!(blocks.iter().any(|b| b.marker == "b." && b.text == "To flow."));
+        assert!(blocks
+            .iter()
+            .any(|b| b.marker == "b." && b.text == "To flow."));
     }
 
     #[test]
@@ -3581,8 +3611,12 @@ mod tests {
         assert_eq!(pron, "ˈkaːne");
         // The redundant headword line is gone; senses + etymology remain.
         assert!(blocks.iter().all(|b| !b.text.contains('\\')));
-        assert!(blocks.iter().any(|b| b.marker == "1." && b.text.starts_with("animale")));
-        assert!(blocks.iter().any(|b| b.quote && b.text.contains("difende il padrone")));
+        assert!(blocks
+            .iter()
+            .any(|b| b.marker == "1." && b.text.starts_with("animale")));
+        assert!(blocks
+            .iter()
+            .any(|b| b.quote && b.text.contains("difende il padrone")));
         assert!(blocks.iter().any(|b| b.text.starts_with("Etimologia:")));
     }
 
@@ -3611,7 +3645,10 @@ mod tests {
         assert_eq!(pos, "");
         assert_eq!(pron, "");
         assert!(blocks.iter().any(|b| b.heading && b.text == "Voce verbale"));
-        let sense = blocks.iter().find(|b| b.marker == "1.").expect("a numbered sense");
+        let sense = blocks
+            .iter()
+            .find(|b| b.marker == "1.")
+            .expect("a numbered sense");
         assert_eq!(
             convert_html_refs_to_links(&sense.text),
             "1ª persona di [correre](<lookup://correre>)"

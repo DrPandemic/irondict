@@ -7,11 +7,11 @@ pub mod search;
 pub mod stardict;
 
 pub use config::{Config, DictionaryConfig, Language, Preferences, ThemeMode};
-pub use download::{CatalogEntry, Progress};
 pub use conjugation::{
     ConjForm, ConjSection, Conjugation, Conjugator, ConjugatorRegistry, EnglishConjugator,
     FrenchConjugator,
 };
+pub use download::{CatalogEntry, Progress};
 pub use manager::{
     bundled_gcide_config, bundled_gcide_path, DictLoadError, DictionaryManager, LookupResult,
     ManagedDictionary,

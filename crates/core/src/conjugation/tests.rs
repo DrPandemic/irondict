@@ -1,110 +1,226 @@
 use super::*;
 use crate::config::Language;
 
-/// A trimmed GCIDE "go" entry: irregular principal parts in the inflection block,
-/// followed by the etymology block (which must be skipped).
-const GCIDE_GO: &str = "Go \\Go\\, v. i. [imp. {Went} (w[e^]nt); p. p. {Gone} (g[o^]n; \
-115); p. pr. & vb. n. {Going}. Went comes from the AS, wendan. See {Wend}, v. i.] \
-[OE. gan, gon, AS. g[=a]n.] 1. To pass from one place to another.";
-
-/// A trimmed GCIDE "be" entry — suppletive present tense (is) comes from a
-/// grammar rule, not the (absent) inline form.
-const GCIDE_BE: &str =
-    "Be \\Be\\, v. i. [imp. {Was}; p. p. {Been}; p. pr. & vb. n. {Being}.] To exist.";
-
-/// A "run" entry with alternative past forms ({Ran} or {Run}).
-const GCIDE_RUN: &str =
-    "Run \\Run\\, v. i. [imp. {Ran}or {Run}; p. p. {Run}; p. pr. & vb. n. {Running}.] To move.";
-
-/// A verb GCIDE leaves unannotated (no inflection block) — exercises the rules.
-const GCIDE_STOP: &str = "Stop \\Stop\\, v. i. 1. To cease to go on; to halt.";
+// --- English (periphrastic grid from bundled irregular table) ----------------
 
 #[test]
-fn parses_irregular_from_gcide_block() {
+fn regular_walk_grid() {
     let c = EnglishConjugator::new();
-    let conj = c.conjugate("go", Some(GCIDE_GO), false).unwrap();
-    let forms = &conj.sections[0].forms;
-    assert_eq!(by_label(forms, "past"), "went");
-    assert_eq!(by_label(forms, "past participle"), "gone");
-    // The "See {Wend}" cross-reference must not be mistaken for a form.
-    assert_eq!(by_label(forms, "present participle"), "going");
-    assert_eq!(by_label(forms, "present (he/she/it)"), "goes");
+    let conj = c.conjugate("walk", None, true).unwrap();
+    assert_eq!(conj.language, Language::English);
+    assert_eq!(conj.infinitive, "walk");
+
+    // Spot-check a few cells across moods and tenses.
+    let pres = &find_section(&conj.sections, "Indicative present").forms;
+    assert_eq!(by_label(pres, "I"), "walk");
+    assert_eq!(by_label(pres, "he/she/it"), "walks");
+    assert_eq!(by_label(pres, "they"), "walk");
+
+    let past = &find_section(&conj.sections, "Indicative past").forms;
+    assert_eq!(by_label(past, "I"), "walked");
+    assert_eq!(by_label(past, "you"), "walked");
+
+    let fut = &find_section(&conj.sections, "Indicative future").forms;
+    assert_eq!(by_label(fut, "we"), "will walk");
+
+    let pres_cont = &find_section(&conj.sections, "Indicative present continuous").forms;
+    assert_eq!(by_label(pres_cont, "I"), "am walking");
+    assert_eq!(by_label(pres_cont, "he/she/it"), "is walking");
+
+    let pf = &find_section(&conj.sections, "Indicative present perfect").forms;
+    assert_eq!(by_label(pf, "I"), "have walked");
+    assert_eq!(by_label(pf, "he/she/it"), "has walked");
+
+    let fut_pf_cont = &find_section(&conj.sections, "Indicative future perfect continuous").forms;
+    assert_eq!(by_label(fut_pf_cont, "they"), "will have been walking");
+
+    let cond = &find_section(&conj.sections, "Conditional").forms;
+    assert_eq!(by_label(cond, "we"), "would walk");
+
+    let nf = &find_section(&conj.sections, "Non-finite").forms;
+    assert_eq!(by_label(nf, "infinitive"), "to walk");
+    assert_eq!(by_label(nf, "present participle"), "walking");
+    assert_eq!(by_label(nf, "past participle"), "walked");
+
+    // Grid has all 17 sections.
+    assert_eq!(conj.sections.len(), 17);
 }
 
 #[test]
-fn suppletive_present_tense() {
+fn irregular_go() {
     let c = EnglishConjugator::new();
-    let conj = c.conjugate("be", Some(GCIDE_BE), false).unwrap();
-    let f = &conj.sections[0].forms;
-    assert_eq!(by_label(f, "present (he/she/it)"), "is");
-    assert_eq!(by_label(f, "past"), "was");
-    assert_eq!(by_label(f, "past participle"), "been");
+    // `go` is in the irregular table; verb-POS should not be required.
+    let conj = c.conjugate("go", None, true).unwrap();
+
+    let pres = &find_section(&conj.sections, "Indicative present").forms;
+    assert_eq!(by_label(pres, "he/she/it"), "goes");
+
+    let past = &find_section(&conj.sections, "Indicative past").forms;
+    assert_eq!(by_label(past, "I"), "went");
+
+    let pf = &find_section(&conj.sections, "Indicative present perfect").forms;
+    assert_eq!(by_label(pf, "he/she/it"), "has gone");
+
+    let nf = &find_section(&conj.sections, "Non-finite").forms;
+    assert_eq!(by_label(nf, "past participle"), "gone");
+    assert_eq!(by_label(nf, "present participle"), "going");
+
+    // Present continuous: "I am going"
+    let cont = &find_section(&conj.sections, "Indicative present continuous").forms;
+    assert_eq!(by_label(cont, "I"), "am going");
 }
 
 #[test]
-fn parses_alternative_past_forms() {
+fn irregular_empty_past_participle_reuses_past() {
+    // `buy` is irregular with no distinct past participle (bought/bought); the
+    // participle must reuse the irregular past, not the regularized `buyed`.
     let c = EnglishConjugator::new();
-    let conj = c.conjugate("run", Some(GCIDE_RUN), false).unwrap();
-    assert_eq!(by_label(&conj.sections[0].forms, "past"), "ran or run");
-    assert_eq!(
-        by_label(&conj.sections[0].forms, "present participle"),
-        "running"
-    );
+    let conj = c.conjugate("buy", None, true).unwrap();
+
+    let past = &find_section(&conj.sections, "Indicative past").forms;
+    assert_eq!(by_label(past, "I"), "bought");
+
+    let pf = &find_section(&conj.sections, "Indicative present perfect").forms;
+    assert_eq!(by_label(pf, "he/she/it"), "has bought");
+
+    let nf = &find_section(&conj.sections, "Non-finite").forms;
+    assert_eq!(by_label(nf, "past participle"), "bought");
 }
 
 #[test]
-fn regular_rules_fill_unannotated_verb() {
+fn suppletive_be() {
     let c = EnglishConjugator::new();
-    let conj = c.conjugate("stop", Some(GCIDE_STOP), false).unwrap();
-    let f = &conj.sections[0].forms;
-    assert_eq!(by_label(f, "past"), "stopped");
-    assert_eq!(by_label(f, "present participle"), "stopping");
-    assert_eq!(by_label(f, "present (he/she/it)"), "stops");
+    let conj = c.conjugate("be", None, true).unwrap();
+
+    let pres = &find_section(&conj.sections, "Indicative present").forms;
+    assert_eq!(by_label(pres, "I"), "am");
+    assert_eq!(by_label(pres, "you"), "are");
+    assert_eq!(by_label(pres, "he/she/it"), "is");
+    assert_eq!(by_label(pres, "we"), "are");
+    assert_eq!(by_label(pres, "they"), "are");
+
+    let past = &find_section(&conj.sections, "Indicative past").forms;
+    assert_eq!(by_label(past, "I"), "was");
+    assert_eq!(by_label(past, "he/she/it"), "was");
+    assert_eq!(by_label(past, "you"), "were");
+    assert_eq!(by_label(past, "we"), "were");
+    assert_eq!(by_label(past, "they"), "were");
+
+    let cont = &find_section(&conj.sections, "Indicative present continuous").forms;
+    assert_eq!(by_label(cont, "I"), "am being");
+    assert_eq!(by_label(cont, "he/she/it"), "is being");
+
+    let past_cont = &find_section(&conj.sections, "Indicative past continuous").forms;
+    assert_eq!(by_label(past_cont, "I"), "was being");
+    assert_eq!(by_label(past_cont, "they"), "were being");
+
+    let pf = &find_section(&conj.sections, "Indicative present perfect").forms;
+    assert_eq!(by_label(pf, "I"), "have been");
+}
+
+#[test]
+fn irregular_run_with_alternatives() {
+    let c = EnglishConjugator::new();
+    let conj = c.conjugate("run", None, true).unwrap();
+
+    let past = &find_section(&conj.sections, "Indicative past").forms;
+    assert_eq!(by_label(past, "I"), "ran");
+
+    let pf = &find_section(&conj.sections, "Indicative present perfect").forms;
+    assert_eq!(by_label(pf, "he/she/it"), "has run");
+
+    let cont = &find_section(&conj.sections, "Indicative present continuous").forms;
+    assert_eq!(by_label(cont, "I"), "am running");
 }
 
 #[test]
 fn regular_spelling_rules() {
     let c = EnglishConjugator::new();
-    // y -> ies / ied, e -> d / drop, sibilant -> es
-    let cases = [
-        ("carry", "carries", "carried", "carrying"),
-        ("study", "studies", "studied", "studying"),
-        ("like", "likes", "liked", "liking"),
-        ("watch", "watches", "watched", "watching"),
-        ("walk", "walks", "walked", "walking"),
-    ];
-    for (verb, third, past, pres_part) in cases {
-        let conj = c.conjugate(verb, None, true).unwrap();
-        let f = &conj.sections[0].forms;
-        assert_eq!(by_label(f, "present (he/she/it)"), third, "{verb} 3sg");
-        assert_eq!(by_label(f, "past"), past, "{verb} past");
-        assert_eq!(by_label(f, "present participle"), pres_part, "{verb} prp");
-    }
+    // y -> ies / ied
+    let conj = c.conjugate("carry", None, true).unwrap();
+    let pres = &find_section(&conj.sections, "Indicative present").forms;
+    assert_eq!(by_label(pres, "he/she/it"), "carries");
+    let past = &find_section(&conj.sections, "Indicative past").forms;
+    assert_eq!(by_label(past, "I"), "carried");
+    let nf = &find_section(&conj.sections, "Non-finite").forms;
+    assert_eq!(by_label(nf, "present participle"), "carrying");
+
+    // e -> d, drop-e+ing
+    let conj = c.conjugate("like", None, true).unwrap();
+    let pres = &find_section(&conj.sections, "Indicative present").forms;
+    assert_eq!(by_label(pres, "he/she/it"), "likes");
+    let past = &find_section(&conj.sections, "Indicative past").forms;
+    assert_eq!(by_label(past, "I"), "liked");
+    let nf = &find_section(&conj.sections, "Non-finite").forms;
+    assert_eq!(by_label(nf, "present participle"), "liking");
+
+    // Sibilant -> es
+    let conj = c.conjugate("watch", None, true).unwrap();
+    let pres = &find_section(&conj.sections, "Indicative present").forms;
+    assert_eq!(by_label(pres, "he/she/it"), "watches");
+
+    // Consonant doubling (monosyllabic CVC)
+    let conj = c.conjugate("stop", None, true).unwrap();
+    let past = &find_section(&conj.sections, "Indicative past").forms;
+    assert_eq!(by_label(past, "I"), "stopped");
+    let nf = &find_section(&conj.sections, "Non-finite").forms;
+    assert_eq!(by_label(nf, "present participle"), "stopping");
 }
 
 #[test]
 fn auto_routing_requires_verb_evidence() {
     let c = EnglishConjugator::new();
-    // No definition + not forced => can't tell it's a verb => decline.
+    // No definition, not forced (Auto mode) — can't tell it's a verb.
     assert!(c.conjugate("walk", None, false).is_none());
-    // A non-verb definition => decline under Auto.
+    // Non-verb definition — decline under Auto.
     assert!(c
         .conjugate("arm", Some("Arm \\Arm\\, n. The limb."), false)
         .is_none());
 }
 
 #[test]
-fn registry_routes_by_language() {
+fn auto_routing_accepts_irregular_even_without_pos() {
+    let c = EnglishConjugator::new();
+    // "go" is in the irregular table — recognised even without a POS marker.
+    assert!(c.conjugate("go", None, false).is_some());
+}
+
+#[test]
+fn auto_routing_accepts_verb_pos() {
+    let c = EnglishConjugator::new();
+    // Regular verb "walk" with a verb POS marker in the definition.
+    assert!(c
+        .conjugate("walk", Some("Walk \\Walk\\, v. i. To move."), false)
+        .is_some());
+}
+
+#[test]
+fn registry_routes_english() {
     let reg = ConjugatorRegistry::new();
     // Pinned English forces a table even with no definition.
     let conj = reg.conjugate("jump", None, Language::English).unwrap();
     assert_eq!(conj.language, Language::English);
-    assert_eq!(by_label(&conj.sections[0].forms, "past"), "jumped");
+    let past = &find_section(&conj.sections, "Indicative past").forms;
+    assert_eq!(by_label(past, "I"), "jumped");
 
     // Auto with a GCIDE verb definition resolves to English.
-    let conj = reg.conjugate("go", Some(GCIDE_GO), Language::Auto).unwrap();
+    let conj = reg
+        .conjugate("go", Some("Go \\Go\\, v. i."), Language::Auto)
+        .unwrap();
     assert_eq!(conj.language, Language::English);
 }
+
+#[test]
+fn have_third_singular_has() {
+    let c = EnglishConjugator::new();
+    let conj = c.conjugate("have", None, true).unwrap();
+    let pres = &find_section(&conj.sections, "Indicative present").forms;
+    assert_eq!(by_label(pres, "he/she/it"), "has");
+    let past = &find_section(&conj.sections, "Indicative past").forms;
+    assert_eq!(by_label(past, "I"), "had");
+}
+
+// --- French (unchanged) -----------------------------------------------------
 
 #[test]
 fn french_parses_a_real_conjugation_table() {
@@ -136,8 +252,6 @@ ils parlaient\n";
 
 #[test]
 fn french_declines_ordinary_prose() {
-    // Petit-Robert-style prose mentioning "présent" must not be mistaken for a
-    // conjugation table.
     let prose = "parler : v. Le présent de ce verbe est courant. \
         Conjugaison : voir modèle 6.";
     let c = FrenchConjugator::new();
@@ -169,10 +283,10 @@ fn french_conj_companion_html_strips_and_parses() {
     assert_eq!(conj.sections[1].label, "Indicatif imparfait");
 }
 
+// --- Italian (unchanged) ----------------------------------------------------
+
 #[test]
 fn italian_conj_companion_html_strips_and_parses() {
-    // The shape the `it-conj` pipeline emits: bold Mood-tense headings, then
-    // `<br>`-separated pronoun-prefixed forms.
     let text = concat!(
         "<b>Indicativo presente</b><br>io parlo<br>tu parli<br>egli parla<br>",
         "noi parliamo<br>voi parlate<br>essi parlano<br>",
@@ -194,7 +308,6 @@ fn italian_conj_companion_html_strips_and_parses() {
 
 #[test]
 fn italian_declines_ordinary_prose() {
-    // A definition that merely mentions tenses must not be taken for a table.
     let prose = "parlare: v. Il presente indicativo è regolare. Coniugazione: modello 1.";
     let c = ItalianConjugator::new();
     assert!(c.conjugate("parlare", Some(prose), true).is_none());
@@ -215,6 +328,15 @@ fn italian_routes_through_registry() {
     assert_eq!(conj.language, Language::Italian);
     assert_eq!(conj.sections.len(), 2);
     assert_eq!(conj.sections[1].label, "Congiuntivo presente");
+}
+
+// --- Helpers ----------------------------------------------------------------
+
+fn find_section<'a>(sections: &'a [ConjSection], label: &str) -> &'a ConjSection {
+    sections
+        .iter()
+        .find(|s| s.label == label)
+        .unwrap_or_else(|| panic!("section '{label}' not found"))
 }
 
 fn by_label<'a>(forms: &'a [ConjForm], label: &str) -> &'a str {

@@ -91,7 +91,12 @@ impl TableSpec {
 /// each with multiple person forms. Returns true when at least two sections have
 /// three or more forms.
 pub(super) fn is_solid_table(sections: &[ConjSection]) -> bool {
-    sections.iter().filter(|s| s.forms.len() >= 3).take(2).count() >= 2
+    sections
+        .iter()
+        .filter(|s| s.forms.len() >= 3)
+        .take(2)
+        .count()
+        >= 2
 }
 
 fn push_section(sections: &mut Vec<ConjSection>, sec: ConjSection) {

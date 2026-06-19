@@ -332,9 +332,11 @@ impl SearchEngine {
                 })?;
             // Closest first, then shorter headwords, then alphabetical for stability.
             scored.sort_by(|a, b| {
-                a.0.cmp(&b.0)
-                    .then(a.1.cmp(&b.1))
-                    .then_with(|| a.2.headword.to_lowercase().cmp(&b.2.headword.to_lowercase()))
+                a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then_with(|| {
+                    a.2.headword
+                        .to_lowercase()
+                        .cmp(&b.2.headword.to_lowercase())
+                })
             });
             return Ok(scored.into_iter().take(limit).map(|(_, _, h)| h).collect());
         }
@@ -588,10 +590,10 @@ fn rank_prefix_exact_first(query: &str, folded: &str, hits: &mut [SearchHit]) {
     hits.sort_by_cached_key(|h| {
         let hw_lower = h.headword.to_lowercase();
         (
-            hw_lower != q_lower,    // false (accent-and-case exact) sorts first
+            hw_lower != q_lower,         // false (accent-and-case exact) sorts first
             fold(&h.headword) != folded, // then accent-insensitive exact
-            h.headword.chars().count(), // then shortest completion
-            hw_lower,               // then alphabetical
+            h.headword.chars().count(),  // then shortest completion
+            hw_lower,                    // then alphabetical
         )
     });
 }

@@ -2,19 +2,18 @@
 //!
 //! The model is deliberately language-agnostic: a [`Conjugation`] is a list of
 //! [`ConjSection`]s (one mood/tense), each holding person-tagged [`ConjForm`]s.
-//! English collapses to a single section of principal parts; French expands to
-//! the full person × tense × mood grid.
+//! French and Italian parse companion dictionaries; English generates the full
+//! periphrastic grid in-code from a bundled irregular-verb table and regular
+//! spelling rules.
 //!
 //! Backends implement [`Conjugator`]; a [`ConjugatorRegistry`] routes a lookup
 //! to the right one. Routing prefers the per-dictionary [`Language`] pinned in
 //! the settings page (Phase 7); when that is `Auto` it tries each backend and
 //! accepts the first that recognizes the headword as a verb.
 //!
-//! Conjugation is sourced **from the loaded dictionaries**, not a bundled verb
-//! dataset: English reads GCIDE's inflection block (regular verbs fall back to
-//! in-code spelling rules); French parses whatever conjugation content the loaded
-//! French dictionary provides (nothing for dictionaries that only reference a
-//! numbered conjugation model, like Le Petit Robert).
+//! Conjugation is sourced **from the loaded dictionaries** for French and
+//! Italian (companion StarDict files).  English is fully in-code — no companion
+//! dictionary or GCIDE inflection-block parsing is needed.
 
 use crate::config::Language;
 
@@ -46,8 +45,8 @@ impl ConjForm {
     }
 }
 
-/// One mood/tense block, e.g. "Indicatif présent" with its six person forms, or
-/// English's single "Principal parts" block.
+/// One mood/tense block, e.g. "Indicatif présent" or "Indicative present" with
+/// its person forms.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConjSection {
     pub label: String,

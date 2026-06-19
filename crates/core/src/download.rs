@@ -324,10 +324,11 @@ mod tests {
 
     #[test]
     fn companion_mapping_round_trips_for_all_languages() {
-        for (primary, companion, language) in
-            [("fr-fr", "fr-conj", Language::French), ("en-en", "en-conj", Language::English),
-             ("it-it", "it-conj", Language::Italian)]
-        {
+        for (primary, companion, language) in [
+            ("fr-fr", "fr-conj", Language::French),
+            ("en-en", "en-conj", Language::English),
+            ("it-it", "it-conj", Language::Italian),
+        ] {
             assert_eq!(companion_for(primary), Some(companion));
             assert_eq!(primary_for(companion), Some(primary));
             assert_eq!(companion_for_language(language), Some(companion));
@@ -346,8 +347,14 @@ mod tests {
 
     #[test]
     fn path_is_companion_matches_install_segment() {
-        assert!(path_is_companion(Path::new("/data/dictionaries/fr-conj/x.ifo")));
-        assert!(path_is_companion(Path::new("/data/dictionaries/it-conj/x.ifo")));
-        assert!(!path_is_companion(Path::new("/data/dictionaries/fr-fr/x.ifo")));
+        assert!(path_is_companion(Path::new(
+            "/data/dictionaries/fr-conj/x.ifo"
+        )));
+        assert!(path_is_companion(Path::new(
+            "/data/dictionaries/it-conj/x.ifo"
+        )));
+        assert!(!path_is_companion(Path::new(
+            "/data/dictionaries/fr-fr/x.ifo"
+        )));
     }
 }
