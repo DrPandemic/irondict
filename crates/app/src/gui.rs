@@ -74,6 +74,10 @@ struct RenderedBlock {
     /// List nesting depth (0 = top level); drives the body's left indent so
     /// sub-senses sit under their parent.
     indent: i32,
+    /// True for the trailing "Conjugation" button block, rendered at the end of
+    /// a verb entry (opens the conjugation overlay). When set, the other fields
+    /// are unused.
+    conj: bool,
 }
 
 /// An intermediate body block, shared by the GCIDE and HTML rendering paths
@@ -98,6 +102,17 @@ impl BlockSpec {
             indent: 0,
         }
     }
+
+    /// A section heading (a part of speech, "Etymology"): bold, larger, no marker.
+    fn heading(text: String) -> Self {
+        BlockSpec {
+            marker: String::new(),
+            text,
+            quote: false,
+            heading: true,
+            indent: 0,
+        }
+    }
 }
 
 struct RenderedConjForm {
@@ -114,7 +129,6 @@ struct RenderedConjSection {
 enum PageBody {
     Entry {
         pron: String,
-        pos: String,
         etym: String,
         blocks: Vec<RenderedBlock>,
         conjugation: Vec<RenderedConjSection>,
@@ -1607,34 +1621,44 @@ fn compute_page(
         )
     } else {
         let parsed = parse_entry(&raw);
-        let blocks = if parsed.senses.is_empty() {
+        let sections = parse_sections(&raw);
+        let has_senses = sections.iter().any(|s| !s.senses.is_empty());
+        let blocks = if !has_senses {
             // Fall back to lightly-cleaned text when we couldn't split senses.
             vec![BlockSpec::plain(cleaned_plain(&raw))]
         } else {
-            parsed
-                .senses
-                .into_iter()
-                .enumerate()
-                .flat_map(|(i, s)| {
-                    // The sense body carries the number; its quotations follow as
-                    // markerless italic blocks.
-                    std::iter::once(BlockSpec {
+            // Each part-of-speech sub-entry contributes a heading followed by its
+            // senses, numbered restarting at 1, so the POS sits above the part of
+            // the description it governs (a noun+verb homograph reads "noun … verb").
+            let mut blocks: Vec<BlockSpec> = Vec::new();
+            for section in sections {
+                if section.senses.is_empty() {
+                    continue;
+                }
+                if !section.pos.is_empty() {
+                    blocks.push(BlockSpec::heading(section.pos));
+                }
+                for (i, s) in section.senses.into_iter().enumerate() {
+                    blocks.push(BlockSpec {
                         marker: format!("{}.", i + 1),
                         text: s.body,
                         quote: false,
                         heading: false,
                         indent: 0,
-                    })
-                    .chain(s.quotes.into_iter().map(|q| BlockSpec {
+                    });
+                    blocks.extend(s.quotes.into_iter().map(|q| BlockSpec {
                         marker: String::new(),
                         text: q,
                         quote: true,
                         heading: false,
                         indent: 0,
-                    }))
-                })
-                .collect()
+                    }));
+                }
+            }
+            blocks
         };
+        // `parsed.pos` is the joined POS, kept only to gate the conjugation button;
+        // it is no longer shown at the top (the per-section headings carry it).
         (parsed.pronunciation, parsed.pos, String::new(), blocks)
     };
 
@@ -1653,7 +1677,7 @@ fn compute_page(
     // sentinels) both become `[word](lookup://word)` links, and HTML `<b>`/`<i>`
     // emphasis (carried as `EMPH_*` sentinels) becomes markdown bold/italic; the
     // block's plain `text` keeps the labels but not the markup.
-    let blocks: Vec<RenderedBlock> = specs
+    let mut blocks: Vec<RenderedBlock> = specs
         .into_iter()
         .map(|b| {
             let (md, text) = if html {
@@ -1671,19 +1695,41 @@ fn compute_page(
                 quote: b.quote,
                 heading: b.heading,
                 indent: b.indent,
+                conj: false,
             }
         })
         .collect();
 
-    // Offer conjugation only when the entry is presented as a verb: the button
-    // must agree with the POS shown to the user, so a noun like "mouse" gets no
-    // "Conjugation". (A word the source lists noun-first is shown as a noun and
-    // so won't offer it, even if it has a secondary verb sense.)
+    // Offer conjugation whenever a verb is among the entry's parts of speech, so
+    // the button agrees with the POS headings the user sees: a noun+verb homograph
+    // like "jump"/"love"/"mouse" conjugates again, while a pure noun like "table"
+    // (no verb POS) gets none. compute_conjugation stays unforced, so its
+    // verb-evidence guard still vetoes a bogus grid.
     let conjugation = if pos_is_verb(&pos) {
         compute_conjugation(manager, headword, &raw, &source)
     } else {
         Vec::new()
     };
+
+    // The "Conjugation" button sits just under the first verb section heading, so
+    // it rides with the verb content it conjugates, above that section's senses.
+    // It's a body block so it flows and scrolls with the content; fall back to the
+    // end if no verb heading exists.
+    if !conjugation.is_empty() {
+        let button = RenderedBlock {
+            marker: String::new(),
+            text: String::new(),
+            md: String::new(),
+            quote: false,
+            heading: false,
+            indent: 0,
+            conj: true,
+        };
+        match blocks.iter().position(|b| b.heading && pos_is_verb(&b.text)) {
+            Some(idx) => blocks.insert(idx + 1, button),
+            None => blocks.push(button),
+        }
+    }
 
     RenderedPage {
         section_label: label.to_string(),
@@ -1691,7 +1737,6 @@ fn compute_page(
         source,
         body: PageBody::Entry {
             pron,
-            pos,
             etym,
             blocks,
             conjugation,
@@ -1752,7 +1797,6 @@ fn apply_page(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, page: &Rend
     match &page.body {
         PageBody::Message { body } => {
             ui.set_def_pron("".into());
-            ui.set_def_pos("".into());
             ui.set_def_etym("".into());
             blocks_model.set_vec(vec![DefBlock {
                 marker: "".into(),
@@ -1761,18 +1805,17 @@ fn apply_page(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, page: &Rend
                 quote: false,
                 heading: false,
                 indent: 0,
+                conj: false,
             }]);
             clear_conjugation(ui);
         }
         PageBody::Entry {
             pron,
-            pos,
             etym,
             blocks,
             conjugation,
         } => {
             ui.set_def_pron(pron.as_str().into());
-            ui.set_def_pos(pos.as_str().into());
             ui.set_def_etym(etym.as_str().into());
             let blocks: Vec<DefBlock> = blocks
                 .iter()
@@ -1783,6 +1826,7 @@ fn apply_page(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, page: &Rend
                     quote: b.quote,
                     heading: b.heading,
                     indent: b.indent,
+                    conj: b.conj,
                 })
                 .collect();
             blocks_model.set_vec(blocks);
@@ -2390,40 +2434,44 @@ fn extract_html_header(paras: &mut Vec<HtmlBlock>, headword: &str) -> (String, S
     });
     let pron_from_ipa = prons.join("  ·  ");
 
-    let (mut pron, mut pos) = (String::new(), String::new());
+    let mut pron = String::new();
 
     // French Wiktionary structure: each part-of-speech section is a heading
     // ("Verbe", "Nom commun") immediately followed by a headword line that
     // repeats the headword with its `\…\` phonetic and grammatical detail. That
-    // line is redundant and visually noisy, so drop it from every section. The
-    // first section's part of speech and phonetic are lifted onto the grey header
-    // line (pos · pron) to mirror GCIDE, and its heading is dropped along with it.
+    // line is redundant and visually noisy, so drop it from every section — but
+    // keep the POS heading in the body, so it labels the senses that follow
+    // (the POS sits above its part of the description, not in a chip at the top).
+    // The first section's phonetic is lifted onto the grey line; the joined POS is
+    // returned only to gate the conjugation button.
+    let mut pos_list: Vec<String> = Vec::new();
     let mut i = 0;
-    let mut lifted = false;
+    let mut pron_lifted = false;
     while i + 1 < paras.len() {
         if paras[i].heading && !paras[i + 1].heading && !paras[i + 1].quote {
             if let Some(p) = slash_pron(&paras[i + 1].text) {
-                if !lifted {
-                    pos = paras[i].text.to_lowercase();
+                push_distinct(&mut pos_list, paras[i].text.to_lowercase());
+                if !pron_lifted {
                     // Drop Wiktionary's "Prononciation ?" placeholder (a real
                     // phonetic never contains a question mark).
                     pron = if p.contains('?') { String::new() } else { p };
-                    paras.drain(i..=i + 1);
-                    lifted = true;
-                } else {
-                    paras.remove(i + 1);
-                    i += 1;
+                    pron_lifted = true;
                 }
+                paras.remove(i + 1);
+                i += 1;
                 continue;
             }
         }
         i += 1;
     }
+    let mut pos = pos_list.join(" · ");
 
-    // Otherwise (e.g. a single-header HTML dictionary) the first non-heading
-    // paragraph repeats the headword with a bracketed phonetic and part of
-    // speech — lift those and drop the duplicate.
-    if !lifted {
+    // Whether the POS already appears as headings in the body (Wiktionary). A
+    // single-header dictionary instead carries the POS inline in the first
+    // paragraph; we lift it and inject it as a heading below, so both layouts put
+    // the POS above the senses.
+    let pos_inline = !pos_list.is_empty();
+    if !pos_inline {
         if let Some(first) = paras.first().filter(|b| !b.heading && !b.quote) {
             let text = first.text.clone();
             match (text.find('['), text.find(']')) {
@@ -2455,6 +2503,21 @@ fn extract_html_header(paras: &mut Vec<HtmlBlock>, headword: &str) -> (String, S
     } else {
         String::new()
     };
+
+    // Single-header dictionary: the lifted POS isn't a body heading yet, so inject
+    // one above the (now header-free) senses to match the Wiktionary layout.
+    if !pos_inline && !pos.is_empty() {
+        paras.insert(
+            0,
+            HtmlBlock {
+                marker: String::new(),
+                text: pos.clone(),
+                quote: false,
+                heading: true,
+                indent: 0,
+            },
+        );
+    }
 
     (pron, pos, etym)
 }
@@ -2670,6 +2733,15 @@ struct Sense {
     quotes: Vec<String>,
 }
 
+/// One part-of-speech sub-entry: its POS heading (e.g. "noun", "verb
+/// (intransitive)") and the senses it governs. GCIDE leads a homograph with
+/// repeated `\Word\, n.` / `\Word\, v. i.` headers; each becomes a section so the
+/// POS heads its own senses in the body instead of a single chip at the top.
+struct PosSection {
+    pos: String,
+    senses: Vec<Sense>,
+}
+
 fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
     cell.get_or_init(|| Regex::new(pattern).unwrap())
 }
@@ -2694,11 +2766,17 @@ fn parse_entry(raw: &str) -> Parsed {
         .map(|p| clean_pron(&decode_gcide(&p)))
         .unwrap_or_default();
 
+    // Collect every sub-entry's part of speech, not just the first: GCIDE leads a
+    // noun+verb homograph (`jump`, `swim`, `love`) with repeated `\Word\, n.` /
+    // `\Word\, v. i.` headers, and we want the chip to show all of them
+    // (`noun · verb (intransitive)`) so the verb sense isn't hidden behind a
+    // noun-first ordering.
     static POS: OnceLock<Regex> = OnceLock::new();
-    let pos = re(&POS, r"\\[^\\]+\\[^,]*,\s*([A-Za-z]\.(?:\s*[A-Za-z]\.)*)")
-        .captures(&text)
-        .map(|c| expand_pos(c[1].trim()))
-        .unwrap_or_default();
+    let mut pos_list: Vec<String> = Vec::new();
+    for c in re(&POS, r"\\[^\\]+\\[^,]*,\s*([A-Za-z]\.(?:\s*[A-Za-z]\.)*)").captures_iter(&text) {
+        push_distinct(&mut pos_list, expand_pos(c[1].trim()));
+    }
+    let pos = pos_list.join(" · ");
 
     Parsed {
         pronunciation: phonetic,
@@ -2711,6 +2789,63 @@ fn parse_entry(raw: &str) -> Parsed {
             })
             .collect(),
     }
+}
+
+/// Split a GCIDE entry into its part-of-speech sub-entries. GCIDE leads each
+/// sense group with a flush-left header line (`Word \respelling\…, pos.`); we cut
+/// the entry at every such line, label the section with its expanded POS, and
+/// parse the senses that follow. An entry with no POS header yields a single
+/// untitled section, so a noun+verb homograph shows "noun" then "verb" inline
+/// while a plain entry still renders uniformly.
+fn parse_sections(raw: &str) -> Vec<PosSection> {
+    let text = drop_markers(raw);
+    static HEADER: OnceLock<Regex> = OnceLock::new();
+    // A flush-left (`^\S`) header line carrying `\respelling\` then `, pos.`.
+    let header = re(
+        &HEADER,
+        r"^\S.*\\[^\\]+\\[^,]*,\s*([A-Za-z]\.(?:\s*[A-Za-z]\.)*)",
+    );
+    let lines: Vec<&str> = text.lines().collect();
+    let heads: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| header.is_match(l))
+        .map(|(i, _)| i)
+        .collect();
+
+    let decode_senses = |segment: &str| -> Vec<Sense> {
+        parse_senses(segment)
+            .into_iter()
+            .map(|s| Sense {
+                body: decode_gcide(&s.body),
+                quotes: s.quotes.iter().map(|q| decode_gcide(q)).collect(),
+            })
+            .collect()
+    };
+
+    if heads.is_empty() {
+        return vec![PosSection {
+            pos: String::new(),
+            senses: decode_senses(&text),
+        }];
+    }
+
+    heads
+        .iter()
+        .enumerate()
+        .map(|(k, &start)| {
+            let end = heads.get(k + 1).copied().unwrap_or(lines.len());
+            let segment = lines[start..end].join("\n");
+            let pos = header
+                .captures(lines[start])
+                .map(|c| expand_pos(c[1].trim()))
+                .unwrap_or_default();
+            PosSection {
+                pos,
+                senses: decode_senses(&segment),
+            }
+        })
+        .collect()
 }
 
 /// Drop editorial marker lines while preserving line structure.
@@ -2776,12 +2911,23 @@ fn pron_echoes_headword(pron: &str, headword: &str) -> bool {
     !pron.is_empty() && letters(pron) == letters(headword)
 }
 
-/// Whether the displayed part-of-speech names a verb, so the Conjugation button
-/// only appears on entries shown as verbs.  Matches GCIDE's expanded
+/// Whether **any** part of speech in the (`·`-joined) chip names a verb, so the
+/// Conjugation button appears whenever a verb sense is among the entry's POS —
+/// including noun-led homographs like `noun · verb`. Matches GCIDE's expanded
 /// `verb`/`verb (transitive)`/`verb (intransitive)` and HTML dictionaries' lower-
-/// cased `verb` heading, while rejecting `noun`/`adverb`/`pronoun`/`proper noun`.
+/// cased `verb`(e) headings, while rejecting `noun`/`adverb`/`pronoun`/`proper noun`.
 fn pos_is_verb(pos: &str) -> bool {
-    pos.trim_start().to_ascii_lowercase().starts_with("verb")
+    pos.split('·')
+        .any(|p| p.trim().to_ascii_lowercase().starts_with("verb"))
+}
+
+/// Append `value` to a part-of-speech list, skipping empties and duplicates so a
+/// repeated heading (or a verb listed transitive *and* intransitive) doesn't
+/// produce a chip like `verb · verb`. Order is preserved (document order).
+fn push_distinct(list: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !list.contains(&value) {
+        list.push(value);
+    }
 }
 
 fn expand_pos(p: &str) -> String {
@@ -2968,6 +3114,7 @@ fn make_snippet(raw: &str, headword: &str) -> String {
         extract_html_header(&mut blocks, headword);
         let joined = blocks
             .iter()
+            .filter(|b| !b.heading)
             .map(|b| b.text.as_str())
             .collect::<Vec<_>>()
             .join(" ");
@@ -3410,6 +3557,31 @@ mod tests {
     }
 
     #[test]
+    fn gcide_homograph_splits_into_pos_sections() {
+        // A noun+verb homograph yields one section per POS, each with its senses
+        // numbered from 1, so the POS heads its own part of the description.
+        let raw = "Mouse \\Mouse\\, n.\n   1. (Zool.) A small rodent.\n\
+                   2. A computer pointing device.\n\
+                   Mouse \\Mouse\\, v. i.\n   1. To hunt for mice.\n";
+        let sections = parse_sections(raw);
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].pos, "noun");
+        assert_eq!(sections[0].senses.len(), 2);
+        assert_eq!(sections[1].pos, "verb (intransitive)");
+        assert_eq!(sections[1].senses.len(), 1);
+        assert_eq!(sections[1].senses[0].body, "To hunt for mice.");
+    }
+
+    #[test]
+    fn gcide_single_pos_is_one_section() {
+        let raw = "Run \\Run\\, v. i.\n   1. To move swiftly.\n";
+        let sections = parse_sections(raw);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].pos, "verb (intransitive)");
+        assert_eq!(sections[0].senses.len(), 1);
+    }
+
+    #[test]
     fn html_header_becomes_pron_pos_line() {
         let html = "<DIV>headword, fem [hɛdwɜːd] adjective and noun</DIV> \
                     <DIV>etym. 1500; from sample</DIV>";
@@ -3419,7 +3591,9 @@ mod tests {
         assert_eq!(pos, "adjective and noun");
         // the headword and etymology lines are lifted into the header
         assert_eq!(etym, "etym. 1500; from sample");
-        assert!(paras.is_empty());
+        // the lifted POS is injected as a body heading above the senses
+        assert_eq!(paras.len(), 1);
+        assert!(paras[0].heading && paras[0].text == "adjective and noun");
     }
 
     #[test]
@@ -3497,12 +3671,23 @@ mod tests {
         assert!(!pos_is_verb("proper noun"));
         assert!(!pos_is_verb(""));
 
-        // A noun-led entry is shown as a noun even though it carries a secondary
-        // verb sense, so the gate hides conjugation (the "mouse" complaint).
+        // The gate fires when any segment of a `·`-joined chip is a verb.
+        assert!(pos_is_verb("noun · verb (intransitive)"));
+        assert!(pos_is_verb("adjective · verb"));
+        assert!(!pos_is_verb("noun · adjective"));
+
+        // A noun-led homograph now shows all its parts of speech, so its verb
+        // sense is no longer hidden and conjugation is offered again (the "mouse"
+        // complaint): GCIDE leads "mouse" with `n.`, then a `v. i.` sub-entry.
         let noun = "Mouse \\Mouse\\, n.\n   1. (Zool.) A small rodent.\n\
                     Mouse \\Mouse\\, v. i.\n   1. To hunt for mice.\n";
-        assert_eq!(parse_entry(noun).pos, "noun");
-        assert!(!pos_is_verb(&parse_entry(noun).pos));
+        assert_eq!(parse_entry(noun).pos, "noun · verb (intransitive)");
+        assert!(pos_is_verb(&parse_entry(noun).pos));
+
+        // A pure noun (no verb sub-entry) still offers no conjugation.
+        let pure_noun = "Table \\Table\\, n.\n   1. A piece of furniture.\n";
+        assert_eq!(parse_entry(pure_noun).pos, "noun");
+        assert!(!pos_is_verb(&parse_entry(pure_noun).pos));
 
         // A verb-led entry still offers conjugation.
         let verb = "Run \\Run\\, v. i.\n   1. To move swiftly.\n";
@@ -3666,17 +3851,30 @@ mod tests {
 
     #[test]
     fn italian_multi_pos_keeps_later_headings() {
-        // `bello` = adjective + noun: the first section lifts to the grey line, the
-        // second keeps its `<h4>` heading but drops its redundant headword line.
+        // `bello` = adjective + noun: every section's POS is collected onto the
+        // grey line, the first section's phonetic is lifted, and the second keeps
+        // its `<h4>` heading but drops its redundant headword line.
         let html = "<h4>Aggettivo</h4><p>bello \\ˈbɛllo\\</p><ol><li>gradevole</li></ol>\
             <h4>Sostantivo</h4><p>bello \\ˈbɛllo\\</p><ol><li>ciò che è bello</li></ol>";
         let mut blocks = html_to_blocks(html);
         let (pron, pos, _etym) = extract_html_header(&mut blocks, "bello");
-        assert_eq!(pos, "aggettivo");
+        assert_eq!(pos, "aggettivo · sostantivo");
         assert_eq!(pron, "ˈbɛllo");
         // The second POS heading survives in the body; no headword line remains.
         assert!(blocks.iter().any(|b| b.heading && b.text == "Sostantivo"));
         assert!(blocks.iter().all(|b| !b.text.contains('\\')));
+    }
+
+    #[test]
+    fn french_verb_homograph_offers_conjugation() {
+        // A noun+verb homograph lists both sections; the joined chip names a verb,
+        // so conjugation is offered even though the noun section comes first.
+        let html = "<h4>Nom commun</h4><p>aide \\ɛd\\</p><ol><li>assistance</li></ol>\
+            <h4>Verbe</h4><p>aide \\ɛd\\</p><ol><li>forme du verbe aider</li></ol>";
+        let mut blocks = html_to_blocks(html);
+        let (_pron, pos, _etym) = extract_html_header(&mut blocks, "aide");
+        assert_eq!(pos, "nom commun · verbe");
+        assert!(pos_is_verb(&pos));
     }
 
     #[test]

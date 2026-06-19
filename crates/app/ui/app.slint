@@ -47,6 +47,9 @@ struct DefBlock {
     heading: bool,
     // List nesting depth (0 = top level); indents nested senses.
     indent: int,
+    // True for the trailing "Conjugation" button (verb entries), rendered at the
+    // end of the body; opens the conjugation overlay.
+    conj: bool,
 }
 
 // One conjugated form (e.g. "past" / "went", or "je" / "parle").
@@ -123,7 +126,6 @@ export component AppWindow inherits Window {
     in property <string> section-label;    // e.g. "WORD OF THE MOMENT"
     in property <string> def-headword;
     in property <string> def-pron;         // pronunciation respelling
-    in property <string> def-pos;          // expanded part of speech
     in property <string> def-etym;         // etymology line (HTML entries)
     in property <[DefBlock]> def-blocks;   // definition body (paragraphs / senses)
     in property <string> def-source;
@@ -522,21 +524,12 @@ export component AppWindow inherits Window {
                         font-weight: 600;
                         color: text-primary;
                     }
-                    // part of speech + pronunciation on one grey line
-                    if def-pos != "" || def-pron != "" : HorizontalLayout {
-                        spacing: 10px;
-                        alignment: start;
-                        if def-pos != "" : Text {
-                            text: def-pos;
-                            font-size: 13px;
-                            font-italic: true;
-                            color: text-secondary;
-                        }
-                        if def-pron != "" : Text {
-                            text: def-pos != "" ? "· " + def-pron : def-pron;
-                            font-size: 13px;
-                            color: text-secondary;
-                        }
+                    // pronunciation on its own grey line (the part of speech is now
+                    // rendered as a heading above each section of the body)
+                    if def-pron != "" : Text {
+                        text: def-pron;
+                        font-size: 13px;
+                        color: text-secondary;
                     }
                     // etymology (HTML entries) on its own grey line
                     if def-etym != "" : Text {
@@ -544,41 +537,6 @@ export component AppWindow inherits Window {
                         font-size: 13px;
                         color: text-secondary;
                         wrap: word-wrap;
-                    }
-
-                    // conjugation button (verbs only): opens the full tables in
-                    // an overlay so they never crowd out the definition body.
-                    if conjugation.length > 0 : HorizontalLayout {
-                        alignment: start;
-                        Rectangle {
-                            height: 30px;
-                            horizontal-stretch: 0;
-                            border-radius: 8px;
-                            background: conj-btn.has-hover ? accent : accent-tint;
-                            border-width: 1px;
-                            border-color: accent;
-                            conj-btn := TouchArea {
-                                clicked => { root.show-conjugation = true; }
-                            }
-                            HorizontalLayout {
-                                padding-left: 14px;
-                                padding-right: 14px;
-                                spacing: 6px;
-                                Text {
-                                    text: "Conjugation";
-                                    vertical-alignment: center;
-                                    font-size: 13px;
-                                    font-weight: 600;
-                                    color: conj-btn.has-hover ? #ffffff : accent;
-                                }
-                                Text {
-                                    text: "▸";
-                                    vertical-alignment: center;
-                                    font-size: 13px;
-                                    color: conj-btn.has-hover ? #ffffff : accent;
-                                }
-                            }
-                        }
                     }
 
                     // body: paragraphs / numbered senses (virtualized).
@@ -589,8 +547,9 @@ export component AppWindow inherits Window {
                         for b[i] in def-blocks: HorizontalLayout {
                             spacing: 8px;
                             alignment: start;
-                            // headings get extra breathing room above the section
-                            padding-top: b.heading ? 14px : (b.quote ? 2px : 4px);
+                            // headings and the trailing button get extra breathing
+                            // room above them
+                            padding-top: b.heading || b.conj ? 14px : (b.quote ? 2px : 4px);
                             padding-bottom: b.quote ? 2px : 4px;
                             // nested senses indent under their parent; quotations
                             // hang a little further in than their sense body
@@ -611,7 +570,40 @@ export component AppWindow inherits Window {
                                 color: text-primary;
                                 horizontal-stretch: 1;
                             }
-                            if !b.quote && !b.heading : StyledText {
+                            // Trailing "Conjugation" button (verb entries): opens
+                            // the full tables in an overlay so they never crowd out
+                            // the definition body.
+                            if b.conj : Rectangle {
+                                height: 30px;
+                                horizontal-stretch: 0;
+                                border-radius: 8px;
+                                background: conj-btn.has-hover ? accent : accent-tint;
+                                border-width: 1px;
+                                border-color: accent;
+                                conj-btn := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.show-conjugation = true; }
+                                }
+                                HorizontalLayout {
+                                    padding-left: 14px;
+                                    padding-right: 14px;
+                                    spacing: 6px;
+                                    Text {
+                                        text: "Conjugation";
+                                        vertical-alignment: center;
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        color: conj-btn.has-hover ? #ffffff : accent;
+                                    }
+                                    Text {
+                                        text: "▸";
+                                        vertical-alignment: center;
+                                        font-size: 13px;
+                                        color: conj-btn.has-hover ? #ffffff : accent;
+                                    }
+                                }
+                            }
+                            if !b.quote && !b.heading && !b.conj : StyledText {
                                 text: b.styled;
                                 default-color: text-primary;
                                 link-color: accent;
