@@ -38,6 +38,14 @@ impl Conjugator for EnglishConjugator {
             return None;
         }
 
+        // Defective modals have no participle or infinitive and don't fit the
+        // periphrastic grid; never emit a (wrong) conjugation for them, even
+        // when forced.  Modals that double as ordinary lexical verbs (`can`
+        // "to can food", `will` "to bequeath") are intentionally excluded.
+        if is_defective_modal(&base) {
+            return None;
+        }
+
         let in_irregular = irregular_verb(&base).is_some();
         let has_pos = definition.is_some_and(has_verb_pos);
         let is_verb = in_irregular || has_pos;
@@ -266,21 +274,34 @@ fn aux_have(person: &str) -> &'static str {
 
 // --- Irregular-verb table ---------------------------------------------------
 //
-// Maps base → (past, past_participle).  Only ~200 irregulars; everything else
-// is covered by the regular spelling rules.  The past participle may be empty
-// when it coincides with the past form — the caller falls back to the regular
-// past (which is also the regular past participle).
+// Maps base → (past, past_participle).  Everything not listed is covered by the
+// regular spelling rules.  The past participle may be empty when it coincides
+// with the past form — the caller falls back to the regular past (which is also
+// the regular past participle).
+//
+// The irregular forms are derived from the English Wiktionary "English irregular
+// verbs" category via kaikki.org / wiktextract, and are therefore licensed
+// CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/) —
+// © Wiktionary contributors.  Regular twins, defective modals, and archaic-only
+// entries were filtered out; see the project's data-attribution notes.
 
 fn irregular_verb(base: &str) -> Option<(&'static str, &'static str)> {
     let v = match base {
+        "abide" => ("abode", ""),
         "arise" => ("arose", "arisen"),
         "awake" => ("awoke", "awoken"),
+        "babysit" => ("babysat", ""),
+        "backslide" => ("backslid", "backslidden"),
         "be" => ("was", "been"),
         "bear" => ("bore", "borne"),
         "beat" => ("beat", "beaten"),
         "become" => ("became", "become"),
+        "befall" => ("befell", "befallen"),
+        "beget" => ("begot", "begotten"),
         "begin" => ("began", "begun"),
+        "behold" => ("beheld", ""),
         "bend" => ("bent", ""),
+        "beset" => ("beset", ""),
         "bet" => ("bet", ""),
         "bid" => ("bid", ""),
         "bind" => ("bound", ""),
@@ -291,22 +312,28 @@ fn irregular_verb(base: &str) -> Option<(&'static str, &'static str)> {
         "breed" => ("bred", ""),
         "bring" => ("brought", ""),
         "broadcast" => ("broadcast", ""),
+        "browbeat" => ("browbeat", "browbeaten"),
         "build" => ("built", ""),
         "burn" => ("burnt", ""),
         "burst" => ("burst", ""),
         "buy" => ("bought", ""),
         "cast" => ("cast", ""),
         "catch" => ("caught", ""),
+        "chide" => ("chid", ""),
         "choose" => ("chose", "chosen"),
+        "clad" => ("clad", ""),
+        "cleave" => ("cleft", ""),
         "cling" => ("clung", ""),
         "come" => ("came", "come"),
         "cost" => ("cost", ""),
         "creep" => ("crept", ""),
+        "crossbreed" => ("crossbred", ""),
         "cut" => ("cut", ""),
         "deal" => ("dealt", ""),
         "dig" => ("dug", ""),
         "dive" => ("dove", ""),
         "do" => ("did", "done"),
+        "downtrod" => ("downtrod", "downtrodden"),
         "draw" => ("drew", "drawn"),
         "dream" => ("dreamt", ""),
         "drink" => ("drank", "drunk"),
@@ -323,11 +350,16 @@ fn irregular_verb(base: &str) -> Option<(&'static str, &'static str)> {
         "fly" => ("flew", "flown"),
         "forbid" => ("forbade", "forbidden"),
         "forecast" => ("forecast", ""),
+        "forego" => ("forewent", "foregone"),
         "foresee" => ("foresaw", "foreseen"),
+        "foretell" => ("foretold", ""),
         "forget" => ("forgot", "forgotten"),
         "forgive" => ("forgave", "forgiven"),
+        "forgo" => ("forwent", "forgone"),
         "forsake" => ("forsook", "forsaken"),
+        "forswear" => ("forswore", "forsworn"),
         "freeze" => ("froze", "frozen"),
+        "gainsay" => ("gainsaid", ""),
         "get" => ("got", "gotten"),
         "give" => ("gave", "given"),
         "go" => ("went", "gone"),
@@ -336,14 +368,22 @@ fn irregular_verb(base: &str) -> Option<(&'static str, &'static str)> {
         "hang" => ("hung", ""),
         "have" => ("had", ""),
         "hear" => ("heard", ""),
+        "hew" => ("hewed", "hewn"),
         "hide" => ("hid", "hidden"),
         "hit" => ("hit", ""),
         "hold" => ("held", ""),
+        "housebreak" => ("housebroke", "housebroken"),
         "hurt" => ("hurt", ""),
+        "input" => ("input", ""),
+        "inset" => ("inset", ""),
+        "interbreed" => ("interbred", ""),
+        "interweave" => ("interwove", "interwoven"),
+        "jailbreak" => ("jailbroke", "jailbroken"),
         "keep" => ("kept", ""),
         "kneel" => ("knelt", ""),
         "knit" => ("knit", ""),
         "know" => ("knew", "known"),
+        "lade" => ("laded", "laden"),
         "lay" => ("laid", ""),
         "lead" => ("led", ""),
         "lean" => ("leant", ""),
@@ -354,21 +394,59 @@ fn irregular_verb(base: &str) -> Option<(&'static str, &'static str)> {
         "let" => ("let", ""),
         "lie" => ("lay", "lain"),
         "light" => ("lit", ""),
+        "lipread" => ("lipread", ""),
         "lose" => ("lost", ""),
         "make" => ("made", ""),
         "mean" => ("meant", ""),
         "meet" => ("met", ""),
+        "mic" => ("miced", ""),
+        "misdo" => ("misdid", "misdone"),
+        "mishear" => ("misheard", ""),
+        "mislay" => ("mislaid", ""),
+        "mislead" => ("misled", ""),
+        "misread" => ("misread", ""),
         "mistake" => ("mistook", "mistaken"),
         "misunderstand" => ("misunderstood", ""),
+        "offset" => ("offset", ""),
+        "outbid" => ("outbid", ""),
+        "outdo" => ("outdid", "outdone"),
+        "outgo" => ("outwent", "outgone"),
+        "outgrow" => ("outgrew", "outgrown"),
+        "outrun" => ("outran", "outrun"),
+        "outsell" => ("outsold", ""),
+        "overbear" => ("overbore", "overborne"),
+        "overcast" => ("overcast", ""),
         "overcome" => ("overcame", "overcome"),
+        "overdo" => ("overdid", "overdone"),
+        "overdraw" => ("overdrew", "overdrawn"),
+        "overgo" => ("overwent", "overgone"),
+        "overgrow" => ("overgrew", "overgrown"),
         "overtake" => ("overtook", "overtaken"),
+        "overthink" => ("overthought", ""),
+        "overthrow" => ("overthrew", "overthrown"),
+        "partake" => ("partook", "partaken"),
         "pay" => ("paid", ""),
         "plead" => ("pled", ""),
+        "proofread" => ("proofread", ""),
         "prove" => ("proved", "proven"),
         "put" => ("put", ""),
         "quit" => ("quit", ""),
         "read" => ("read", ""),
+        "rebuild" => ("rebuilt", ""),
+        "rebuy" => ("rebought", ""),
+        "recast" => ("recast", ""),
+        "redo" => ("redid", "redone"),
+        "redraw" => ("redrew", "redrawn"),
+        "relay" => ("relaid", ""),
+        "rend" => ("rent", ""),
         "repay" => ("repaid", ""),
+        "reset" => ("reset", ""),
+        "resing" => ("resang", "resung"),
+        "resit" => ("resat", ""),
+        "restrike" => ("restruck", ""),
+        "rethink" => ("rethought", ""),
+        "rewrite" => ("rewrote", "rewritten"),
+        "rid" => ("rid", ""),
         "ride" => ("rode", "ridden"),
         "ring" => ("rang", "rung"),
         "rise" => ("rose", "risen"),
@@ -385,23 +463,30 @@ fn irregular_verb(base: &str) -> Option<(&'static str, &'static str)> {
         "shear" => ("sheared", "shorn"),
         "shed" => ("shed", ""),
         "shine" => ("shone", ""),
+        "shit" => ("shat", ""),
+        "shoe" => ("shod", ""),
         "shoot" => ("shot", ""),
         "show" => ("showed", "shown"),
         "shrink" => ("shrank", "shrunk"),
+        "shrive" => ("shrove", "shriven"),
         "shut" => ("shut", ""),
+        "sightsee" => ("sightsaw", "sightseen"),
         "sing" => ("sang", "sung"),
         "sink" => ("sank", "sunk"),
         "sit" => ("sat", ""),
+        "skywrite" => ("skywrote", "skywritten"),
         "slay" => ("slew", "slain"),
         "sleep" => ("slept", ""),
         "slide" => ("slid", ""),
         "sling" => ("slung", ""),
+        "slink" => ("slunk", ""),
         "slit" => ("slit", ""),
         "smell" => ("smelt", ""),
         "sow" => ("sowed", "sown"),
         "speak" => ("spoke", "spoken"),
         "speed" => ("sped", ""),
         "spell" => ("spelt", ""),
+        "spellbind" => ("spellbound", ""),
         "spend" => ("spent", ""),
         "spill" => ("spilt", ""),
         "spin" => ("spun", ""),
@@ -415,8 +500,10 @@ fn irregular_verb(base: &str) -> Option<(&'static str, &'static str)> {
         "stick" => ("stuck", ""),
         "sting" => ("stung", ""),
         "stink" => ("stank", "stunk"),
+        "strew" => ("strewed", "strewn"),
         "stride" => ("strode", "stridden"),
         "strike" => ("struck", ""),
+        "strikethrough" => ("struckthrough", ""),
         "string" => ("strung", ""),
         "strive" => ("strove", "striven"),
         "swear" => ("swore", "sworn"),
@@ -429,15 +516,24 @@ fn irregular_verb(base: &str) -> Option<(&'static str, &'static str)> {
         "tear" => ("tore", "torn"),
         "tell" => ("told", ""),
         "think" => ("thought", ""),
+        "thrive" => ("throve", "thriven"),
         "throw" => ("threw", "thrown"),
         "thrust" => ("thrust", ""),
         "tread" => ("trod", "trodden"),
+        "typeset" => ("typeset", ""),
+        "unbind" => ("unbound", ""),
+        "undercut" => ("undercut", ""),
+        "underdo" => ("underdid", "underdone"),
         "undergo" => ("underwent", "undergone"),
+        "underlie" => ("underlay", "underlain"),
         "understand" => ("understood", ""),
         "undertake" => ("undertook", "undertaken"),
+        "underwrite" => ("underwrote", "underwritten"),
         "undo" => ("undid", "undone"),
+        "unwind" => ("unwound", ""),
         "upset" => ("upset", ""),
         "wake" => ("woke", "woken"),
+        "waylay" => ("waylaid", ""),
         "wear" => ("wore", "worn"),
         "weave" => ("wove", "woven"),
         "wed" => ("wed", ""),
@@ -514,8 +610,8 @@ fn regular_third_singular(base: &str) -> String {
     format!("{base}s")
 }
 
-/// Regular past / past participle: `-ed`, `-d` after `e`, `y→ied`, or final
-/// consonant doubling for monosyllabic CVC stems.
+/// Regular past / past participle: `-ed`, `-d` after `e`, `y→ied`, `c→cked`
+/// after a vowel, or final consonant doubling.
 fn regular_past(base: &str) -> String {
     let chars: Vec<char> = base.chars().collect();
     let n = chars.len();
@@ -525,14 +621,17 @@ fn regular_past(base: &str) -> String {
     if n >= 2 && chars[n - 1] == 'y' && !is_vowel(chars[n - 2]) {
         return format!("{}ied", &base[..base.len() - 1]);
     }
-    if let Some(doubled) = double_final_consonant(&chars) {
+    if base.ends_with("ic") {
+        return format!("{base}ked");
+    }
+    if let Some(doubled) = double_final_consonant(base, &chars) {
         return format!("{doubled}ed");
     }
     format!("{base}ed")
 }
 
-/// Present participle: `-ing`, dropping a silent `e`, `ie→ying`, or doubling a
-/// monosyllabic CVC final consonant.
+/// Present participle: `-ing`, dropping a silent `e`, `ie→ying`, `c→cking`
+/// after a vowel, or doubling a final consonant.
 fn regular_present_participle(base: &str) -> String {
     let chars: Vec<char> = base.chars().collect();
     let n = chars.len();
@@ -542,29 +641,66 @@ fn regular_present_participle(base: &str) -> String {
     if base.ends_with('e') && !base.ends_with("ee") && n > 2 {
         return format!("{}ing", &base[..base.len() - 1]);
     }
-    if let Some(doubled) = double_final_consonant(&chars) {
+    if base.ends_with("ic") {
+        return format!("{base}king");
+    }
+    if let Some(doubled) = double_final_consonant(base, &chars) {
         return format!("{doubled}ing");
     }
     format!("{base}ing")
 }
 
-/// For a monosyllabic stem ending in consonant-vowel-consonant (final consonant
-/// not `w`/`x`/`y`), return the stem with its final consonant doubled.
-fn double_final_consonant(chars: &[char]) -> Option<String> {
+/// For a stem ending in a doublable final consonant (not `w`/`x`/`y`), return
+/// the stem with its final consonant doubled.  Monosyllabic consonant-vowel-
+/// consonant stems always double; for polysyllables, doubling keys on
+/// final-syllable stress, which can't be read off the spelling, so the common
+/// stress-final doublers are consulted from a curated list.
+fn double_final_consonant(base: &str, chars: &[char]) -> Option<String> {
     let n = chars.len();
     if n < 3 {
         return None;
     }
-    let (c1, c2, c3) = (chars[n - 3], chars[n - 2], chars[n - 1]);
-    let cvc = !is_vowel(c1) && is_vowel(c2) && !is_vowel(c3);
-    let doublable = !matches!(c3, 'w' | 'x' | 'y');
-    if cvc && doublable && is_monosyllabic(chars) {
+    let c3 = chars[n - 1];
+    if matches!(c3, 'w' | 'x' | 'y') || is_vowel(c3) {
+        return None;
+    }
+    let (c1, c2) = (chars[n - 3], chars[n - 2]);
+    let monosyllabic_cvc = !is_vowel(c1) && is_vowel(c2) && is_monosyllabic(chars);
+    if monosyllabic_cvc || POLYSYLLABIC_DOUBLERS.contains(&base) {
         let mut s: String = chars.iter().collect();
         s.push(c3);
         Some(s)
     } else {
         None
     }
+}
+
+/// Common polysyllabic verbs that double their final consonant before `-ed`/
+/// `-ing` because their final syllable is stressed — a fact not derivable from
+/// spelling (cf. `prefer`→`preferred` vs `offer`→`offered`).  Listing the
+/// frequent stress-final doublers avoids both the under-generation of a
+/// monosyllable-only rule and the over-generation (`visit`→`*visitted`) of a
+/// blanket consonant-vowel-consonant rule.
+static POLYSYLLABIC_DOUBLERS: &[&str] = &[
+    "abet", "abhor", "acquit", "admit", "allot", "babysit", "befit", "beget",
+    "begin", "beset", "commit", "compel", "concur", "confer", "control",
+    "defer", "demur", "deter", "dispel", "emit", "enrol", "entrap", "equip",
+    "excel", "expel", "extol", "forbid", "forget", "format", "handicap",
+    "impel", "incur", "infer", "input", "inset", "inter", "kidnap", "occur",
+    "offset", "omit", "outbid", "outfit", "outrun", "outwit", "overlap",
+    "patrol", "permit", "prefer", "program", "propel", "rebel", "rebut",
+    "recap", "recur", "refer", "regret", "remit", "repel", "reset", "resit",
+    "retrofit", "submit", "transfer", "transmit", "unban", "unwrap", "upset",
+];
+
+/// Defective modals with no participle/infinitive that don't fit the
+/// periphrastic grid.  `can` and `will` are deliberately absent: they double as
+/// ordinary lexical verbs (to can food, to will a bequest) and conjugate fine.
+fn is_defective_modal(base: &str) -> bool {
+    matches!(
+        base,
+        "may" | "might" | "shall" | "should" | "must" | "would" | "could" | "ought"
+    )
 }
 
 /// Rough syllable count via vowel groups; doubling only applies to monosyllables.

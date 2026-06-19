@@ -104,6 +104,12 @@ Downloaded dictionaries are sourced from
 being derived from Wiktionary, are licensed
 [CC BY-SA](https://creativecommons.org/licenses/by-sa/4.0/).
 
+The bundled English irregular-verb table used for conjugation is likewise
+derived from the English Wiktionary "English irregular verbs" category (via
+[kaikki.org / wiktextract](https://kaikki.org/)) and is licensed
+[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) —
+© Wiktionary contributors.
+
 ## License
 
 [GPL-3.0-or-later](LICENSE).

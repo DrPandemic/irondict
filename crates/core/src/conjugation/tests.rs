@@ -88,6 +88,25 @@ fn irregular_empty_past_participle_reuses_past() {
 }
 
 #[test]
+fn wiktionary_derived_verbs_conjugate() {
+    // Verbs folded in from the Wiktionary-derived table: a prefixed compound and
+    // a standalone irregular with a distinct participle.
+    let c = EnglishConjugator::new();
+
+    let mislead = c.conjugate("mislead", None, true).unwrap();
+    let past = &find_section(&mislead.sections, "Indicative past").forms;
+    assert_eq!(by_label(past, "I"), "misled");
+    let nf = &find_section(&mislead.sections, "Non-finite").forms;
+    assert_eq!(by_label(nf, "past participle"), "misled");
+
+    let beget = c.conjugate("beget", None, true).unwrap();
+    let past = &find_section(&beget.sections, "Indicative past").forms;
+    assert_eq!(by_label(past, "I"), "begot");
+    let nf = &find_section(&beget.sections, "Non-finite").forms;
+    assert_eq!(by_label(nf, "past participle"), "begotten");
+}
+
+#[test]
 fn suppletive_be() {
     let c = EnglishConjugator::new();
     let conj = c.conjugate("be", None, true).unwrap();
@@ -165,6 +184,89 @@ fn regular_spelling_rules() {
     assert_eq!(by_label(past, "I"), "stopped");
     let nf = &find_section(&conj.sections, "Non-finite").forms;
     assert_eq!(by_label(nf, "present participle"), "stopping");
+}
+
+#[test]
+fn c_final_takes_k_before_ed_ing() {
+    // Verbs ending in `-ic` add `k` to keep the /k/ sound: panic -> panicked.
+    let c = EnglishConjugator::new();
+    let conj = c.conjugate("panic", None, true).unwrap();
+    let past = &find_section(&conj.sections, "Indicative past").forms;
+    assert_eq!(by_label(past, "I"), "panicked");
+    let nf = &find_section(&conj.sections, "Non-finite").forms;
+    assert_eq!(by_label(nf, "present participle"), "panicking");
+    assert_eq!(by_label(nf, "past participle"), "panicked");
+
+    let traffic = c.conjugate("traffic", None, true).unwrap();
+    let past = &find_section(&traffic.sections, "Indicative past").forms;
+    assert_eq!(by_label(past, "I"), "trafficked");
+}
+
+#[test]
+fn polysyllabic_stress_doubling() {
+    // Final-stress polysyllables double; near-twins with non-final stress don't.
+    let c = EnglishConjugator::new();
+
+    let prefer = c.conjugate("prefer", None, true).unwrap();
+    let past = &find_section(&prefer.sections, "Indicative past").forms;
+    assert_eq!(by_label(past, "I"), "preferred");
+    let nf = &find_section(&prefer.sections, "Non-finite").forms;
+    assert_eq!(by_label(nf, "present participle"), "preferring");
+
+    let equip = c.conjugate("equip", None, true).unwrap();
+    let nf = &find_section(&equip.sections, "Non-finite").forms;
+    assert_eq!(by_label(nf, "past participle"), "equipped");
+    assert_eq!(by_label(nf, "present participle"), "equipping");
+
+    // Irregular-table verbs take their present participle from the regular
+    // rules, so polysyllabic final-stress irregulars must double there too.
+    let begin = c.conjugate("begin", None, true).unwrap();
+    let nf = &find_section(&begin.sections, "Non-finite").forms;
+    assert_eq!(by_label(nf, "present participle"), "beginning");
+    let forget = c.conjugate("forget", None, true).unwrap();
+    let nf = &find_section(&forget.sections, "Non-finite").forms;
+    assert_eq!(by_label(nf, "present participle"), "forgetting");
+
+    // Not in the doubler list, first-syllable stress -> no doubling.
+    let visit = c.conjugate("visit", None, true).unwrap();
+    let past = &find_section(&visit.sections, "Indicative past").forms;
+    assert_eq!(by_label(past, "I"), "visited");
+    let offer = c.conjugate("offer", None, true).unwrap();
+    let nf = &find_section(&offer.sections, "Non-finite").forms;
+    assert_eq!(by_label(nf, "present participle"), "offering");
+}
+
+#[test]
+fn compound_irregulars_inherit_base_forms() {
+    let c = EnglishConjugator::new();
+    let cases = [
+        ("partake", "partook", "partaken"),
+        ("outdo", "outdid", "outdone"),
+        ("gainsay", "gainsaid", "gainsaid"),
+        ("browbeat", "browbeat", "browbeaten"),
+        ("spellbind", "spellbound", "spellbound"),
+        ("proofread", "proofread", "proofread"),
+        ("typeset", "typeset", "typeset"),
+    ];
+    for (verb, want_past, want_pp) in cases {
+        let conj = c.conjugate(verb, None, true).unwrap();
+        let past = &find_section(&conj.sections, "Indicative past").forms;
+        assert_eq!(by_label(past, "I"), want_past, "{verb} past");
+        let nf = &find_section(&conj.sections, "Non-finite").forms;
+        assert_eq!(by_label(nf, "past participle"), want_pp, "{verb} pp");
+    }
+}
+
+#[test]
+fn defective_modals_decline() {
+    let c = EnglishConjugator::new();
+    // No periphrastic grid for pure modals, even when forced.
+    for m in ["may", "must", "shall", "ought", "would"] {
+        assert!(c.conjugate(m, None, true).is_none(), "{m} should decline");
+    }
+    // `can`/`will` have ordinary lexical-verb senses and still conjugate.
+    assert!(c.conjugate("can", None, true).is_some());
+    assert!(c.conjugate("will", None, true).is_some());
 }
 
 #[test]
