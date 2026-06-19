@@ -293,6 +293,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         TouchArea {
+                            mouse-cursor: pointer;
                             clicked => { root.scope-changed(idx); }
                         }
                     }
@@ -308,6 +309,7 @@ export component AppWindow inherits Window {
                 border-radius: 8px;
                 background: gear-touch.has-hover ? divider : transparent;
                 gear-touch := TouchArea {
+                    mouse-cursor: pointer;
                     clicked => { root.open-settings(); }
                 }
                 Text {
@@ -388,6 +390,7 @@ export component AppWindow inherits Window {
                         border-radius: 9px;
                         background: clear-touch.has-hover ? divider : transparent;
                         clear-touch := TouchArea {
+                            mouse-cursor: pointer;
                             clicked => {
                                 root.query = "";
                                 root.query-changed("");
@@ -447,6 +450,7 @@ export component AppWindow inherits Window {
                             background: i == root.selected-index ? accent : transparent;
                         }
                         TouchArea {
+                            mouse-cursor: pointer;
                             clicked => { root.select(i); }
                         }
                         VerticalLayout {
@@ -696,6 +700,7 @@ export component AppWindow inherits Window {
                         border-radius: 6px;
                         background: close-touch.has-hover ? divider : transparent;
                         close-touch := TouchArea {
+                            mouse-cursor: pointer;
                             clicked => { root.close-settings(); }
                         }
                         Text {
@@ -733,6 +738,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             nav-touch := TouchArea {
+                                mouse-cursor: pointer;
                                 clicked => { active-panel = ni; }
                             }
                         }
@@ -795,6 +801,7 @@ export component AppWindow inherits Window {
                                             background: remove-touch.has-hover ? divider : transparent;
                                             border-radius: 6px;
                                             remove-touch := TouchArea {
+                                                mouse-cursor: pointer;
                                                 clicked => { root.remove-dict(i); }
                                             }
                                             Text {
@@ -869,6 +876,7 @@ export component AppWindow inherits Window {
                                                 border-radius: 6px;
                                                 background: delete-touch.has-hover ? divider : transparent;
                                                 delete-touch := TouchArea {
+                                                    mouse-cursor: pointer;
                                                     clicked => { root.delete-dict(i); }
                                                 }
                                                 Text {
@@ -900,6 +908,7 @@ export component AppWindow inherits Window {
                                                 }
                                                 dl-touch := TouchArea {
                                                     enabled: c.status == 0;
+                                                    mouse-cursor: self.enabled ? pointer : default;
                                                     clicked => { root.download-dict(i); }
                                                 }
                                             }
@@ -948,6 +957,7 @@ export component AppWindow inherits Window {
                                             color: theme-mode == ti ? #ffffff : text-secondary;
                                         }
                                         TouchArea {
+                                            mouse-cursor: pointer;
                                             clicked => { root.set-theme-mode(ti); }
                                         }
                                     }
@@ -984,6 +994,7 @@ export component AppWindow inherits Window {
                                         color: text-secondary;
                                     }
                                     TouchArea {
+                                        mouse-cursor: pointer;
                                         clicked => { root.set-accent(0); }
                                     }
                                 }
@@ -995,6 +1006,7 @@ export component AppWindow inherits Window {
                                     border-width: accent-choice == si + 1 ? 3px : 0px;
                                     border-color: text-primary;
                                     TouchArea {
+                                        mouse-cursor: pointer;
                                         clicked => { root.set-accent(si + 1); }
                                     }
                                 }
@@ -1045,6 +1057,7 @@ export component AppWindow inherits Window {
                         border-radius: 6px;
                         background: conj-close.has-hover ? divider : transparent;
                         conj-close := TouchArea {
+                            mouse-cursor: pointer;
                             clicked => { root.show-conjugation = false; }
                         }
                         Text {
@@ -1085,6 +1098,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             mood-touch := TouchArea {
+                                mouse-cursor: pointer;
                                 clicked => {
                                     conj-tab = ti;
                                     // start the new mood's tenses from the top
