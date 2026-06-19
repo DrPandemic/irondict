@@ -619,7 +619,6 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
                         build_start = None;
                         ui.set_indexing(false);
                         ui.set_index_progress(1.0);
-                        ui.set_index_ready(true);
                         // Run whatever the user has already typed against the new index.
                         let q = ui.get_query();
                         if !q.trim().is_empty() {
@@ -1292,14 +1291,13 @@ fn human_duration(secs: f32) -> String {
 }
 
 /// Ask the worker to rebuild the index (the dictionary set changed). The worker
-/// keeps serving the old index until the new one is ready; `index_ready` flips
-/// back on via the `IndexReady` message.
+/// keeps serving the old index until the new one is ready; `indexing` clears
+/// again via the `IndexReady` message.
 fn request_rebuild(
     ui: &AppWindow,
     req_tx: &Rc<mpsc::Sender<WorkerReq>>,
     build_gen: &Rc<Cell<u64>>,
 ) {
-    ui.set_index_ready(false);
     // Show the loading bar immediately, at empty. Every caller changes the
     // dictionary set, so the signature never matches the cached manifest and the
     // worker always does a real build — but its first `IndexProgress` only lands

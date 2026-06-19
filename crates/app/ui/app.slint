@@ -116,7 +116,6 @@ export component AppWindow inherits Window {
     in property <[ResultItem]> results;
     in-out property <int> selected-index: 0;
     in property <bool> searching: false;
-    in property <bool> index-ready: false;
     in property <bool> indexing: false;             // index build in progress
     in property <float> index-progress: 0.0;        // 0..1, drives the loading bar
     in property <string> index-status: "Indexing…"; // placeholder text while indexing
@@ -357,7 +356,10 @@ export component AppWindow inherits Window {
                             x: 0;
                             width: parent.width;
                             visible: root.query == "";
-                            text: root.index-ready ? "Search…" : root.index-status;
+                            // "Indexing…" only during a real (re)build; otherwise
+                            // a plain prompt, including the brief startup window
+                            // where the engine is opening its cached index.
+                            text: root.indexing ? root.index-status : "Search…";
                             horizontal-alignment: left;
                             vertical-alignment: center;
                             font-size: 14px;
