@@ -112,14 +112,18 @@ impl ConjugatorRegistry {
 
     /// Conjugate `headword`, routing by the caller's preferred `language`.
     ///
-    /// When `language` is a specific one, the matching backend is asked for a
-    /// forced best-effort table. When it is `Auto`, every backend is tried in
-    /// registration order and the first confident match wins.
+    /// When `language` is a specific one, the matching backend is asked; `force`
+    /// requests a best-effort table even without verb evidence (e.g. the
+    /// explicit CLI `conjugate` command), while `force == false` lets the
+    /// backend decline non-verbs so callers can gate UI on the result. When
+    /// `language` is `Auto`, `force` is ignored: every backend is tried in
+    /// registration order and only the first *confident* match wins.
     pub fn conjugate(
         &self,
         headword: &str,
         definition: Option<&str>,
         language: Language,
+        force: bool,
     ) -> Option<Conjugation> {
         match language {
             Language::Auto => self
@@ -130,7 +134,7 @@ impl ConjugatorRegistry {
                 .backends
                 .iter()
                 .find(|b| b.language() == lang)
-                .and_then(|b| b.conjugate(headword, definition, true)),
+                .and_then(|b| b.conjugate(headword, definition, force)),
         }
     }
 }

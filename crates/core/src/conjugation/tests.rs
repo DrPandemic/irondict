@@ -297,17 +297,35 @@ fn auto_routing_accepts_verb_pos() {
 }
 
 #[test]
+fn html_verb_heading_counts_as_verb_evidence() {
+    let c = EnglishConjugator::new();
+    // HTML dictionary entry with a Verb heading + inflection line -> conjugable
+    // even unforced, so regular verbs keep their conjugation in HTML dicts.
+    let verb = "<h4>Verb</h4><p>walk (third-person singular simple present walks, \
+        present participle walking, simple past and past participle walked)</p>";
+    assert!(c.conjugate("walk", Some(verb), false).is_some());
+    // A noun-only HTML entry has no verb evidence -> declined unforced, so the
+    // GUI doesn't offer a conjugation for it.
+    let noun = "<h4>Noun</h4><p>serendipity (plural serendipities)</p>";
+    assert!(c.conjugate("serendipity", Some(noun), false).is_none());
+}
+
+#[test]
 fn registry_routes_english() {
     let reg = ConjugatorRegistry::new();
-    // Pinned English forces a table even with no definition.
-    let conj = reg.conjugate("jump", None, Language::English).unwrap();
+    // Pinned English + force: a best-effort table even with no definition.
+    let conj = reg.conjugate("jump", None, Language::English, true).unwrap();
     assert_eq!(conj.language, Language::English);
     let past = &find_section(&conj.sections, "Indicative past").forms;
     assert_eq!(by_label(past, "I"), "jumped");
 
-    // Auto with a GCIDE verb definition resolves to English.
+    // Pinned English without force declines a word with no verb evidence, so
+    // the GUI doesn't offer conjugation for every headword in an English dict.
+    assert!(reg.conjugate("jump", None, Language::English, false).is_none());
+
+    // Auto with a GCIDE verb definition resolves to English (force ignored).
     let conj = reg
-        .conjugate("go", Some("Go \\Go\\, v. i."), Language::Auto)
+        .conjugate("go", Some("Go \\Go\\, v. i."), Language::Auto, false)
         .unwrap();
     assert_eq!(conj.language, Language::English);
 }
@@ -343,7 +361,7 @@ vous parliez\n\
 ils parlaient\n";
     let reg = ConjugatorRegistry::new();
     let conj = reg
-        .conjugate("parler", Some(text), Language::French)
+        .conjugate("parler", Some(text), Language::French, true)
         .unwrap();
     assert_eq!(conj.language, Language::French);
     assert_eq!(conj.sections.len(), 2);
@@ -425,7 +443,7 @@ fn italian_routes_through_registry() {
     );
     let reg = ConjugatorRegistry::new();
     let conj = reg
-        .conjugate("temere", Some(text), Language::Italian)
+        .conjugate("temere", Some(text), Language::Italian, true)
         .unwrap();
     assert_eq!(conj.language, Language::Italian);
     assert_eq!(conj.sections.len(), 2);

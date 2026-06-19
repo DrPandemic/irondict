@@ -250,15 +250,17 @@ fn conjugate(verb: &str, lang: Option<Language>) -> Result<()> {
             let def = companion
                 .as_deref()
                 .or_else(|| definitions.first().map(|(_, t)| t.as_str()));
-            reg.conjugate(verb, def, forced)
+            // Explicit `--lang`: the user asked to conjugate this word, so force
+            // a best-effort table even without verb evidence.
+            reg.conjugate(verb, def, forced, true)
         }
         // Auto: try each dictionary under its pinned language, preferring that
         // language's companion text over the dictionary's own definition, and
-        // accept the first recognized verb.
+        // accept the first recognized verb (unforced, so non-verbs are declined).
         None => definitions.iter().find_map(|(dl, text)| {
             let companion = manager.companion_text(verb, *dl);
             let def = companion.as_deref().or(Some(text.as_str()));
-            reg.conjugate(verb, def, *dl)
+            reg.conjugate(verb, def, *dl, false)
         }),
     };
 

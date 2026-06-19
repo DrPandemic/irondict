@@ -553,9 +553,11 @@ fn irregular_verb(base: &str) -> Option<(&'static str, &'static str)> {
 
 // --- Verb part-of-speech detection ------------------------------------------
 
-/// Whether `definition` carries a verb part-of-speech marker (`v.`, `v. t.`,
-/// `v. i.`, …).  Used as weak evidence the headword is a verb during `Auto`
-/// routing, so English doesn't shadow other languages for non-verbs.
+/// Whether `definition` carries a verb part-of-speech marker.  Used as evidence
+/// the headword is a verb so non-verbs (e.g. the noun "serendipity") don't get a
+/// conjugation, both during `Auto` routing and when a specific English source is
+/// asked unforced.  Recognizes GCIDE's `v. t.`/`v. i.` abbreviations as well as
+/// the HTML POS heading and inflection line that Wiktionary entries carry.
 fn has_verb_pos(definition: &str) -> bool {
     find_verb_pos(definition).is_some()
 }
@@ -563,12 +565,18 @@ fn has_verb_pos(definition: &str) -> bool {
 /// The byte index just after the first verb part-of-speech marker, if any.
 fn find_verb_pos(text: &str) -> Option<usize> {
     const MARKERS: &[&str] = &[
+        // GCIDE inline abbreviations.
         "v. t. & i.",
         "v. i. & t.",
         "v. t.",
         "v. i.",
         "v. impers.",
         ", v.",
+        // HTML dictionaries: a "Verb" POS heading (`<h3>Verb</h3>`, …) or the
+        // inflection line every verb headword carries.  `>Verb<` avoids matching
+        // "Adverb"/"Proverb".
+        ">Verb<",
+        "present participle",
     ];
     MARKERS
         .iter()

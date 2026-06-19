@@ -1675,7 +1675,15 @@ fn compute_page(
         })
         .collect();
 
-    let conjugation = compute_conjugation(manager, headword, &raw, &source);
+    // Offer conjugation only when the entry is presented as a verb: the button
+    // must agree with the POS shown to the user, so a noun like "mouse" gets no
+    // "Conjugation". (A word the source lists noun-first is shown as a noun and
+    // so won't offer it, even if it has a secondary verb sense.)
+    let conjugation = if pos_is_verb(&pos) {
+        compute_conjugation(manager, headword, &raw, &source)
+    } else {
+        Vec::new()
+    };
 
     RenderedPage {
         section_label: label.to_string(),
@@ -1713,7 +1721,10 @@ fn compute_conjugation(
         .as_deref()
         .or(if !raw.is_empty() { Some(raw) } else { None });
 
-    let Some(conj) = ConjugatorRegistry::new().conjugate(headword, def, language) else {
+    // Not forced: the backend declines non-verbs (e.g. the noun "mouse"), so an
+    // empty result hides the Conjugation button rather than generating a bogus
+    // grid for every headword in an English dictionary.
+    let Some(conj) = ConjugatorRegistry::new().conjugate(headword, def, language, false) else {
         return Vec::new();
     };
     conj.sections
@@ -2765,6 +2776,14 @@ fn pron_echoes_headword(pron: &str, headword: &str) -> bool {
     !pron.is_empty() && letters(pron) == letters(headword)
 }
 
+/// Whether the displayed part-of-speech names a verb, so the Conjugation button
+/// only appears on entries shown as verbs.  Matches GCIDE's expanded
+/// `verb`/`verb (transitive)`/`verb (intransitive)` and HTML dictionaries' lower-
+/// cased `verb` heading, while rejecting `noun`/`adverb`/`pronoun`/`proper noun`.
+fn pos_is_verb(pos: &str) -> bool {
+    pos.trim_start().to_ascii_lowercase().starts_with("verb")
+}
+
 fn expand_pos(p: &str) -> String {
     let norm: String = p.chars().filter(|c| !c.is_whitespace()).collect();
     match norm.as_str() {
@@ -3464,6 +3483,31 @@ mod tests {
         assert_eq!(parsed.senses.len(), 1);
         assert_eq!(parsed.senses[0].body, "The science of antiquities.");
         assert!(parsed.senses[0].quotes.is_empty());
+    }
+
+    #[test]
+    fn conjugation_button_follows_displayed_pos() {
+        // The gate mirrors the POS chip the user sees.
+        assert!(pos_is_verb("verb"));
+        assert!(pos_is_verb("verb (transitive)"));
+        assert!(pos_is_verb("verb (intransitive)"));
+        assert!(!pos_is_verb("noun"));
+        assert!(!pos_is_verb("adverb"));
+        assert!(!pos_is_verb("pronoun"));
+        assert!(!pos_is_verb("proper noun"));
+        assert!(!pos_is_verb(""));
+
+        // A noun-led entry is shown as a noun even though it carries a secondary
+        // verb sense, so the gate hides conjugation (the "mouse" complaint).
+        let noun = "Mouse \\Mouse\\, n.\n   1. (Zool.) A small rodent.\n\
+                    Mouse \\Mouse\\, v. i.\n   1. To hunt for mice.\n";
+        assert_eq!(parse_entry(noun).pos, "noun");
+        assert!(!pos_is_verb(&parse_entry(noun).pos));
+
+        // A verb-led entry still offers conjugation.
+        let verb = "Run \\Run\\, v. i.\n   1. To move swiftly.\n";
+        assert_eq!(parse_entry(verb).pos, "verb (intransitive)");
+        assert!(pos_is_verb(&parse_entry(verb).pos));
     }
 
     #[test]
