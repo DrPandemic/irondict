@@ -1,25 +1,38 @@
 //! StarDict `.idx` / `.syn` handling, owned by us rather than delegated to the
-//! `stardict` crate so that the synonym index doesn't have to be parsed into a
-//! `HashMap` at boot.
+//! `stardict` crate so that neither file has to be parsed into a `HashMap` at
+//! boot.
 //!
-//! The `.idx` (headword → `.dict` blocks) is parsed eagerly — it is needed for
-//! every lookup. Parsing it is allocation-bound (one record per headword, ~1.7M
-//! across the installed set), so it is kept cheap three ways: the headwords are
-//! stored **columnar** (one shared text buffer plus parallel `Vec`s of offsets,
-//! rather than an `IdxEntry`/`Vec` per record), the maps are sized up front from
-//! the `.ifo` counts to avoid rehashing, and the parse is **fanned out across
-//! cores** with rayon (a cheap sequential boundary scan, then a parallel
-//! decode/index per shard, merged in order).
+//! The `.idx` maps each headword to its `.dict` block(s). Rather than decode it
+//! into owned strings/vectors on every launch (allocation-bound across the ~1.7M
+//! records of the installed set), we keep the `.idx` **memory-mapped** and store
+//! only what a lookup actually needs, as two small `u32` tables:
 //!
-//! The `.syn` file (variant / inflected forms aliasing a headword) is the
-//! expensive part to parse into a map: it can hold millions of entries. But it
-//! is already sorted by lowercased word on disk, so instead of building a map we
-//! keep the file memory-mapped and **binary-search it on demand**. The only
-//! preprocessing is a one-off scan that records each entry's byte offset (a
-//! `Vec<usize>`, no string allocation), built lazily on the first synonym lookup
-//! — so opening a dictionary does no `.syn` work at all.
+//! * `rec_offsets` — the byte offset of every record's start in the mapped file,
+//!   so a record's headword and `.dict` block can be read straight from the map.
+//!   It covers *all* records in file order (including empty-word ones) so a
+//!   `.syn` index, which points into that order, maps directly to a record.
+//! * `order` — the record indices of the non-empty headwords, sorted by their
+//!   lowercased word, so a lookup is an `O(log n)` binary search over the map
+//!   instead of an `O(1)` hash probe into a parsed table.
+//!
+//! Those two tables are the only derived data, and they are persisted to a
+//! **sidecar cache** in the OS cache dir (see [`cache`]). On the first launch
+//! after a dictionary is added or changed we scan the `.idx` once (a cheap
+//! sequential boundary scan plus a parallel sort) and write the cache; every
+//! later launch just reads the cache back and re-maps the `.idx`, so opening a
+//! dictionary does no parsing at all. The cache is validated against the
+//! `.idx` file's length and mtime and silently rebuilt on any mismatch, and all
+//! cache I/O is best-effort — a read-only or missing cache dir just falls back
+//! to scanning.
+//!
+//! The `.syn` file (variant / inflected forms aliasing a headword) is handled
+//! the same way it always has been: kept memory-mapped and **binary-searched on
+//! demand** (it is already sorted by lowercased word on disk), with a one-off
+//! lazy offset scan on the first synonym lookup — so opening a dictionary does
+//! no `.syn` work either.
 
-use std::collections::{HashMap, HashSet};
+use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -33,19 +46,26 @@ use stardict::ifo::{Ifo, Version};
 
 use crate::Error;
 
-/// Decode a StarDict string field. Valid UTF-8 (essentially every record) is
-/// taken verbatim — the common path, avoiding a per-character pass; only invalid
-/// bytes fall back to lossy decoding with the replacement character dropped, the
-/// way the `stardict` crate decodes, so headwords stay byte-identical to what the
-/// rest of the pipeline expects.
-fn decode(buf: &[u8]) -> String {
+/// Decode a StarDict string field, borrowing the mapped bytes when they are
+/// valid UTF-8 (essentially every record) and only allocating on the rare
+/// invalid record, where it falls back to lossy decoding with the replacement
+/// character dropped — the way the `stardict` crate decodes, so headwords stay
+/// byte-identical to what the rest of the pipeline expects.
+fn decode_cow(buf: &[u8]) -> Cow<'_, str> {
     match std::str::from_utf8(buf) {
-        Ok(s) => s.to_owned(),
-        Err(_) => String::from_utf8_lossy(buf)
-            .chars()
-            .filter(|&c| c != '\u{fffd}')
-            .collect(),
+        Ok(s) => Cow::Borrowed(s),
+        Err(_) => Cow::Owned(
+            String::from_utf8_lossy(buf)
+                .chars()
+                .filter(|&c| c != '\u{fffd}')
+                .collect(),
+        ),
     }
+}
+
+/// [`decode_cow`] as an owned `String`, used where a borrow can't be held.
+fn decode(buf: &[u8]) -> String {
+    decode_cow(buf).into_owned()
 }
 
 /// Width in bytes of the `.idx` offset and size fields. StarDict v2.4.2 uses
@@ -62,187 +82,188 @@ fn read_be(buf: &[u8]) -> usize {
     buf.iter().fold(0usize, |acc, &b| (acc << 8) | b as usize)
 }
 
-/// A parsed `.idx` plus an optional lazily-searched `.syn`.
-///
-/// Headwords are stored columnar in file order (including empty-word records, so
-/// a `.syn` entry's stored index — which points into the original order — maps
-/// directly to record `i`). `words` is every headword concatenated; record `i`'s
-/// headword is `words[word_starts[i]..word_starts[i + 1]]`. `offsets`/`sizes` are
-/// its `.dict` block. This avoids the per-record `String`/`Vec` allocations a
-/// naive parse pays across ~1.7M records.
+/// Headword count (from the `.ifo`) below which the sidecar cache isn't used:
+/// scanning a small `.idx` costs well under a millisecond, so a cache would only
+/// add I/O and clutter the cache dir (notably with throwaway test fixtures). The
+/// cache earns its keep on the large dictionaries the boot cost actually comes
+/// from.
+const CACHE_MIN_WORDS: usize = 10_000;
+
+/// The `.idx` bytes the [`Index`] reads from: memory-mapped for a plain `.idx`,
+/// or owned for a gzipped one (which has to be decompressed into memory). The
+/// record-offset table indexes into whichever this is.
+enum IdxData {
+    Mapped(Mmap),
+    Owned(Vec<u8>),
+}
+
+impl IdxData {
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            IdxData::Mapped(m) => &m[..],
+            IdxData::Owned(v) => v,
+        }
+    }
+
+    /// Map a plain `.idx`, or read + decompress a gzipped one.
+    fn open(idx_path: &Path, idx_gz: bool) -> Result<IdxData, Error> {
+        if idx_gz {
+            let bytes = std::fs::read(idx_path)?;
+            let mut out = Vec::new();
+            GzDecoder::new(bytes.as_slice()).read_to_end(&mut out)?;
+            Ok(IdxData::Owned(out))
+        } else {
+            let file = File::open(idx_path)?;
+            // SAFETY: the `.idx` is a read-only data file we never write to; a
+            // concurrent external truncation could fault, but that is true of
+            // every dictionary file the app maps and is outside the threat model.
+            let mmap = unsafe { Mmap::map(&file)? };
+            Ok(IdxData::Mapped(mmap))
+        }
+    }
+}
+
+/// Read a record's original-case headword from the mapped `.idx` at byte
+/// `off` (a record start): the bytes up to the terminating `\0`.
+fn read_word(data: &[u8], off: usize) -> Cow<'_, str> {
+    let rel = data[off..]
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(data.len() - off);
+    decode_cow(&data[off..off + rel])
+}
+
+/// A mapped `.idx` plus the small derived tables that drive lookups, and an
+/// optional lazily-searched `.syn`. None of the headwords are copied into owned
+/// strings at boot; they are read from [`data`](Self::data) on demand.
 pub struct Index {
-    words: String,
-    /// `n + 1` entries: the start of each record's headword in `words`, plus a
-    /// trailing sentinel equal to `words.len()`.
-    word_starts: Vec<u32>,
-    offsets: Vec<u64>,
-    sizes: Vec<u32>,
-    /// Lowercased headword → the record positions that share it (StarDict can
-    /// list the same word more than once with different blocks), each list in
-    /// ascending order. Drives normal lookups; built once at parse time.
-    by_word: HashMap<String, Vec<u32>>,
+    data: IdxData,
+    /// Width of the `.idx` offset/size fields (4 or 8), from the `.ifo`.
+    field_bytes: usize,
+    /// Byte offset of every record's start in `data`, in file order (including
+    /// empty-word records, so a `.syn` index maps directly to record `i`).
+    rec_offsets: Vec<u32>,
+    /// Record indices (into `rec_offsets`) of the non-empty headwords, sorted by
+    /// lowercased word then by record index. Binary-searched for lookups; equal
+    /// keys form one contiguous run, in ascending record order.
+    order: Vec<u32>,
     /// The synonym file, kept mapped and searched on demand. `None` when the
     /// dictionary ships no `.syn`.
     syn: Option<Syn>,
 }
 
-/// One worker's slice of the parse, holding record `base..base + len` decoded
-/// into local columnar buffers plus a local lowercased index using **global**
-/// record positions. Merged into the final [`Index`] in shard order, which keeps
-/// every `by_word` list ascending.
-struct Shard {
-    words: String,
-    /// Local start of each record's headword in this shard's `words`.
-    starts: Vec<u32>,
-    offsets: Vec<u64>,
-    sizes: Vec<u32>,
-    by_word: HashMap<String, Vec<u32>>,
-}
-
 impl Index {
-    /// Parse `idx_path` (gz-decompressing it when `idx_gz`) and remember `syn`
-    /// for lazy resolution. Only the `.idx` is read here; the `.syn` is mapped
-    /// but not scanned until the first synonym lookup.
+    /// Open `idx_path` (gz-decompressing when `idx_gz`) and remember `syn` for
+    /// lazy resolution. The derived tables are loaded from the sidecar cache when
+    /// it is present and valid, otherwise built by one scan of the `.idx` and
+    /// written back. Only the `.idx` is touched here; the `.syn` is mapped but
+    /// not scanned until the first synonym lookup.
     pub fn new(
         idx_path: &Path,
         ifo: &Ifo,
         idx_gz: bool,
         syn: Option<&Path>,
     ) -> Result<Index, Error> {
-        let bytes = std::fs::read(idx_path)?;
-        let data = if idx_gz {
-            let mut out = Vec::new();
-            GzDecoder::new(bytes.as_slice()).read_to_end(&mut out)?;
-            out
-        } else {
-            bytes
+        let data = IdxData::open(idx_path, idx_gz)?;
+        let w = idx_field_bytes(ifo);
+
+        // Validate/load the cache against the source file's length and mtime
+        // (not the decompressed bytes), so a gzipped `.idx` is keyed correctly.
+        let (src_len, src_mtime) = match std::fs::metadata(idx_path) {
+            Ok(m) => (m.len(), m.modified().ok()),
+            Err(_) => (0, None),
         };
 
-        let w = idx_field_bytes(ifo);
-        let n = data.len();
-
-        // Pass 1 (sequential, cheap): record boundaries as `(word_start, null)`
-        // byte positions in `data`. The fixed-width offset/size field can itself
-        // contain `0`, so we advance past it rather than scanning into it. Empty
-        // headwords are kept so `.syn` indices stay valid.
-        let mut recs: Vec<(usize, usize)> = Vec::new();
-        let mut i = 0usize;
-        while i < n {
-            let Some(rel) = data[i..].iter().position(|&b| b == 0) else {
-                break;
-            };
-            let zero = i + rel;
-            if zero + 1 + 2 * w > n {
-                break;
-            }
-            recs.push((i, zero));
-            i = zero + 1 + 2 * w;
-        }
-
-        // Pass 2 (parallel): decode each shard's headwords into local columnar
-        // buffers and a local lowercased index keyed on global positions.
-        let chunk = (recs.len() / (rayon::current_num_threads() * 4)).max(4096);
-        let shards: Vec<Shard> = recs
-            .par_chunks(chunk)
-            .enumerate()
-            .map(|(c, chunk_recs)| {
-                let base = (c * chunk) as u32;
-                let mut shard = Shard {
-                    words: String::new(),
-                    starts: Vec::with_capacity(chunk_recs.len()),
-                    offsets: Vec::with_capacity(chunk_recs.len()),
-                    sizes: Vec::with_capacity(chunk_recs.len()),
-                    by_word: HashMap::new(),
-                };
-                for (local, &(ws, we)) in chunk_recs.iter().enumerate() {
-                    let start = shard.words.len() as u32;
-                    shard.starts.push(start);
-                    match std::str::from_utf8(&data[ws..we]) {
-                        Ok(s) => shard.words.push_str(s),
-                        Err(_) => {
-                            let s: String = String::from_utf8_lossy(&data[ws..we])
-                                .chars()
-                                .filter(|&c| c != '\u{fffd}')
-                                .collect();
-                            shard.words.push_str(&s);
-                        }
-                    }
-                    let fp = we + 1;
-                    shard.offsets.push(read_be(&data[fp..fp + w]) as u64);
-                    shard.sizes.push(read_be(&data[fp + w..fp + 2 * w]) as u32);
-                    if shard.words.len() as u32 > start {
-                        let gi = base + local as u32;
-                        let lower = shard.words[start as usize..].to_lowercase();
-                        shard.by_word.entry(lower).or_default().push(gi);
-                    }
+        // Only large dictionaries go through the cache; small ones are cheap to
+        // scan and aren't worth a cache file (see [`CACHE_MIN_WORDS`]).
+        let (rec_offsets, order) = if ifo.wordcount >= CACHE_MIN_WORDS {
+            match cache::load(idx_path, src_len, src_mtime) {
+                Some(tables) => tables,
+                None => {
+                    let tables = build(data.as_bytes(), w);
+                    cache::store(idx_path, src_len, src_mtime, &tables.0, &tables.1);
+                    tables
                 }
-                shard
-            })
-            .collect();
-
-        // Merge shards in order. Concatenating in shard order keeps each
-        // `by_word` list ascending (shard positions are global and a shard's own
-        // pushes are in record order). Maps are sized from the `.ifo` counts so
-        // they don't rehash while filling.
-        let total_words: usize = shards.iter().map(|s| s.words.len()).sum();
-        let mut words = String::with_capacity(total_words);
-        let mut word_starts: Vec<u32> = Vec::with_capacity(recs.len() + 1);
-        let mut offsets: Vec<u64> = Vec::with_capacity(recs.len());
-        let mut sizes: Vec<u32> = Vec::with_capacity(recs.len());
-        let mut by_word: HashMap<String, Vec<u32>> = HashMap::with_capacity(ifo.wordcount);
-        for shard in shards {
-            let base = words.len() as u32;
-            for &s in &shard.starts {
-                word_starts.push(base + s);
             }
-            words.push_str(&shard.words);
-            offsets.extend(shard.offsets);
-            sizes.extend(shard.sizes);
-            for (k, v) in shard.by_word {
-                by_word.entry(k).or_default().extend(v);
-            }
-        }
-        word_starts.push(words.len() as u32);
+        } else {
+            build(data.as_bytes(), w)
+        };
 
         let syn = match syn {
             Some(path) => Some(Syn::open(path)?),
             None => None,
         };
         Ok(Index {
-            words,
-            word_starts,
-            offsets,
-            sizes,
-            by_word,
+            data,
+            field_bytes: w,
+            rec_offsets,
+            order,
             syn,
         })
     }
 
     /// Number of records (file order), including empty-word ones.
     fn len(&self) -> usize {
-        self.word_starts.len().saturating_sub(1)
+        self.rec_offsets.len()
     }
 
-    /// Record `i`'s original-case headword.
-    fn word(&self, i: usize) -> &str {
-        let start = self.word_starts[i] as usize;
-        let end = self.word_starts[i + 1] as usize;
-        &self.words[start..end]
+    /// Record `i`'s original-case headword, read from the mapped `.idx`.
+    fn word(&self, i: usize) -> Cow<'_, str> {
+        read_word(self.data.as_bytes(), self.rec_offsets[i] as usize)
     }
 
-    /// Merge the blocks of every record position sharing a headword into a single
-    /// [`IdxEntry`], taking the first record's original-case word. Allocated only
-    /// at lookup/iteration time, not for every record at boot.
+    /// Record `i`'s `.dict` block `(offset, size)`, read from the mapped `.idx`.
+    fn fields(&self, i: usize) -> (usize, usize) {
+        let data = self.data.as_bytes();
+        let off = self.rec_offsets[i] as usize;
+        let rel = data[off..].iter().position(|&b| b == 0).unwrap_or(0);
+        let fp = off + rel + 1;
+        let w = self.field_bytes;
+        (read_be(&data[fp..fp + w]), read_be(&data[fp + w..fp + 2 * w]))
+    }
+
+    /// Merge the blocks of every record sharing a headword into a single
+    /// [`IdxEntry`], taking the first record's original-case word. `ids` are
+    /// record indices (a run from `order`); allocated only at lookup/iteration
+    /// time, not for every record at boot.
     fn merge(&self, ids: &[u32]) -> IdxEntry {
-        let word = self.word(ids[0] as usize).to_string();
+        let word = self.word(ids[0] as usize).into_owned();
         let blocks = ids
             .iter()
-            .map(|&id| IdxEntryBlock {
-                offset: self.offsets[id as usize] as usize,
-                size: self.sizes[id as usize] as usize,
+            .map(|&id| {
+                let (offset, size) = self.fields(id as usize);
+                IdxEntryBlock { offset, size }
             })
             .collect();
         IdxEntry { word, blocks }
+    }
+
+    /// The contiguous run of `order` whose lowercased headword equals `lower`,
+    /// found by binary search. Returns the record indices, or `None` for a miss.
+    fn find_run(&self, lower: &str) -> Option<&[u32]> {
+        let order = &self.order;
+        let n = order.len();
+        // Lower bound: the first record whose key is not less than `lower`.
+        let mut lo = 0usize;
+        let mut hi = n;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.word(order[mid] as usize).to_lowercase().as_str() < lower {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        let start = lo;
+        let mut k = lo;
+        while k < n && self.word(order[k] as usize).to_lowercase() == lower {
+            k += 1;
+        }
+        if k > start {
+            Some(&order[start..k])
+        } else {
+            None
+        }
     }
 
     /// The entries for `word`: its own definition (if any) followed by the
@@ -254,7 +275,7 @@ impl Index {
         let mut out: Vec<IdxEntry> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
 
-        if let Some(ids) = self.by_word.get(&lower) {
+        if let Some(ids) = self.find_run(&lower) {
             let entry = self.merge(ids);
             seen.insert(entry.word.clone());
             out.push(entry);
@@ -266,7 +287,7 @@ impl Index {
                     continue;
                 }
                 let canonical = self.word(raw).to_lowercase();
-                if let Some(ids) = self.by_word.get(&canonical) {
+                if let Some(ids) = self.find_run(&canonical) {
                     let entry = self.merge(ids);
                     if seen.insert(entry.word.clone()) {
                         out.push(entry);
@@ -282,37 +303,241 @@ impl Index {
         }
     }
 
-    /// The headword at position `n` modulo the dictionary size, in `by_word`'s
-    /// iteration order. Returns `None` only for an empty dictionary.
+    /// A headword at position `n` modulo the searchable set. Used to pick a
+    /// "word of the moment" without materializing every entry. Returns `None`
+    /// only for an empty dictionary.
     pub fn nth_word(&self, n: usize) -> Option<String> {
-        let len = self.by_word.len();
-        if len == 0 {
+        if self.order.is_empty() {
             return None;
         }
-        self.by_word
-            .values()
-            .nth(n % len)
-            .map(|ids| self.word(ids[0] as usize).to_string())
+        let id = self.order[n % self.order.len()];
+        Some(self.word(id as usize).into_owned())
     }
 
     /// Visit every distinct headword as a merged [`IdxEntry`] (one per word, all
-    /// its blocks). Used to feed the search index.
+    /// its blocks). Used to feed the search index. Walks `order`, grouping the
+    /// contiguous run of each lowercased word.
     pub fn for_each_word(&self, mut f: impl FnMut(IdxEntry) -> std::ops::ControlFlow<()>) {
-        for ids in self.by_word.values() {
-            if f(self.merge(ids)).is_break() {
+        let n = self.order.len();
+        let mut k = 0usize;
+        while k < n {
+            let key = self.word(self.order[k] as usize).to_lowercase();
+            let start = k;
+            k += 1;
+            while k < n && self.word(self.order[k] as usize).to_lowercase() == key {
+                k += 1;
+            }
+            if f(self.merge(&self.order[start..k])).is_break() {
                 break;
             }
         }
     }
 }
 
+/// Build the derived tables by scanning the `.idx` bytes: a cheap sequential
+/// boundary scan for `rec_offsets`, then a parallel sort of the non-empty
+/// records by lowercased word (tie-broken by record index, so equal-word runs
+/// stay in ascending order). Run only on a cache miss.
+fn build(data: &[u8], w: usize) -> (Vec<u32>, Vec<u32>) {
+    let n = data.len();
+
+    // The fixed-width offset/size field can itself contain `0`, so advance past
+    // it rather than scanning into it. Empty headwords are kept so `.syn`
+    // indices stay valid.
+    let mut rec_offsets: Vec<u32> = Vec::new();
+    let mut i = 0usize;
+    while i < n {
+        let Some(rel) = data[i..].iter().position(|&b| b == 0) else {
+            break;
+        };
+        let zero = i + rel;
+        if zero + 1 + 2 * w > n {
+            break;
+        }
+        rec_offsets.push(i as u32);
+        i = zero + 1 + 2 * w;
+    }
+
+    // Searchable subset: records whose headword is non-empty (the byte at the
+    // record start isn't the terminating `\0`).
+    let mut order: Vec<u32> = rec_offsets
+        .iter()
+        .enumerate()
+        .filter(|&(_, &off)| data.get(off as usize) != Some(&0))
+        .map(|(i, _)| i as u32)
+        .collect();
+    order.par_sort_by_cached_key(|&i| {
+        let off = rec_offsets[i as usize] as usize;
+        (read_word(data, off).to_lowercase(), i)
+    });
+
+    (rec_offsets, order)
+}
+
 impl std::fmt::Debug for Index {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Index")
-            .field("words", &self.by_word.len())
             .field("records", &self.len())
+            .field("searchable", &self.order.len())
             .field("has_syn", &self.syn.is_some())
             .finish()
+    }
+}
+
+/// On-disk sidecar cache of an `.idx`'s derived lookup tables (`rec_offsets` and
+/// `order`), so a launch after the first skips scanning and sorting the `.idx`.
+///
+/// One file per dictionary lives in the OS cache dir, named by a hash of the
+/// `.idx`'s absolute path. The header stores the source `.idx`'s length and
+/// mtime plus its absolute path; a load is accepted only when all three match
+/// the file on disk (length + mtime guard against an updated dictionary, the
+/// stored path guards against a hash collision). Everything is little-endian.
+/// All I/O here is best-effort: any failure to read or write the cache falls
+/// back to building the tables from the `.idx`, so a read-only or absent cache
+/// dir is harmless.
+mod cache {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const MAGIC: &[u8; 4] = b"IDXC";
+    const VERSION: u32 = 1;
+
+    /// The `.idx` absolute path as a string, used both to name the cache file
+    /// and, stored in the header, to guard against hash collisions.
+    fn abs_path(idx_path: &Path) -> String {
+        std::fs::canonicalize(idx_path)
+            .unwrap_or_else(|_| idx_path.to_path_buf())
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn cache_path(abs: &str) -> Option<PathBuf> {
+        let dirs = directories::ProjectDirs::from("", "", "irondict")?;
+        let mut h = DefaultHasher::new();
+        abs.hash(&mut h);
+        let name = format!("{:016x}.idxcache", h.finish());
+        Some(dirs.cache_dir().join("idx").join(name))
+    }
+
+    fn mtime_nanos(t: Option<SystemTime>) -> i64 {
+        t.and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0)
+    }
+
+    fn rd_u32(b: &[u8], o: usize) -> Option<u32> {
+        Some(u32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?))
+    }
+
+    fn rd_u64(b: &[u8], o: usize) -> Option<u64> {
+        Some(u64::from_le_bytes(b.get(o..o + 8)?.try_into().ok()?))
+    }
+
+    fn rd_i64(b: &[u8], o: usize) -> Option<i64> {
+        Some(i64::from_le_bytes(b.get(o..o + 8)?.try_into().ok()?))
+    }
+
+    fn read_u32_vec(bytes: &[u8]) -> Vec<u32> {
+        bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    /// Load and validate the cache for `idx_path`. Returns the
+    /// `(rec_offsets, order)` tables, or `None` on any miss/mismatch/error.
+    pub fn load(
+        idx_path: &Path,
+        src_len: u64,
+        src_mtime: Option<SystemTime>,
+    ) -> Option<(Vec<u32>, Vec<u32>)> {
+        let abs = abs_path(idx_path);
+        let path = cache_path(&abs)?;
+        let buf = std::fs::read(&path).ok()?;
+        parse(&buf, &abs, src_len, src_mtime)
+    }
+
+    fn parse(
+        buf: &[u8],
+        abs: &str,
+        src_len: u64,
+        src_mtime: Option<SystemTime>,
+    ) -> Option<(Vec<u32>, Vec<u32>)> {
+        if buf.get(0..4)? != MAGIC || rd_u32(buf, 4)? != VERSION {
+            return None;
+        }
+        if rd_u64(buf, 8)? != src_len {
+            return None;
+        }
+        // Validate mtime only when both sides have one; otherwise length and the
+        // stored path carry the check.
+        let stored_mtime = rd_i64(buf, 16)?;
+        let cur_mtime = mtime_nanos(src_mtime);
+        if stored_mtime != 0 && cur_mtime != 0 && stored_mtime != cur_mtime {
+            return None;
+        }
+
+        let path_len = rd_u32(buf, 24)? as usize;
+        let mut p = 28usize;
+        if buf.get(p..p + path_len)? != abs.as_bytes() {
+            return None;
+        }
+        p += path_len;
+
+        let n = rd_u64(buf, p)? as usize;
+        p += 8;
+        let rec_offsets = read_u32_vec(buf.get(p..p + n * 4)?);
+        p += n * 4;
+
+        let m = rd_u64(buf, p)? as usize;
+        p += 8;
+        let order = read_u32_vec(buf.get(p..p + m * 4)?);
+
+        Some((rec_offsets, order))
+    }
+
+    /// Write the cache for `idx_path`. Best-effort: any error is ignored, so the
+    /// next launch simply rebuilds the tables.
+    pub fn store(
+        idx_path: &Path,
+        src_len: u64,
+        src_mtime: Option<SystemTime>,
+        rec_offsets: &[u32],
+        order: &[u32],
+    ) {
+        let abs = abs_path(idx_path);
+        let Some(path) = cache_path(&abs) else {
+            return;
+        };
+
+        let mut buf =
+            Vec::with_capacity(28 + abs.len() + 16 + rec_offsets.len() * 4 + order.len() * 4);
+        buf.extend_from_slice(MAGIC);
+        buf.extend_from_slice(&VERSION.to_le_bytes());
+        buf.extend_from_slice(&src_len.to_le_bytes());
+        buf.extend_from_slice(&mtime_nanos(src_mtime).to_le_bytes());
+        buf.extend_from_slice(&(abs.len() as u32).to_le_bytes());
+        buf.extend_from_slice(abs.as_bytes());
+        buf.extend_from_slice(&(rec_offsets.len() as u64).to_le_bytes());
+        for &x in rec_offsets {
+            buf.extend_from_slice(&x.to_le_bytes());
+        }
+        buf.extend_from_slice(&(order.len() as u64).to_le_bytes());
+        for &x in order {
+            buf.extend_from_slice(&x.to_le_bytes());
+        }
+
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Write to a per-process temp file then rename, so a concurrent launch
+        // never observes a half-written cache.
+        let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+        if std::fs::write(&tmp, &buf).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
     }
 }
 
