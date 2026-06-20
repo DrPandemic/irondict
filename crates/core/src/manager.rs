@@ -129,6 +129,27 @@ impl DictionaryManager {
         (manager, errors)
     }
 
+    /// Build a second manager over the same dictionaries, each sharing the
+    /// already-parsed index (see [`crate::model::Dictionary::reopen`]) with a
+    /// fresh `.dict` reader. Cheap — it skips the multi-second `.idx`/`.syn`
+    /// parse — so the search worker can be handed its own manager at launch
+    /// without reparsing every dictionary a second time.
+    pub fn reopen(&self) -> Result<Self, Error> {
+        let mut dicts = Vec::with_capacity(self.dicts.len());
+        for d in &self.dicts {
+            dicts.push(ManagedDictionary {
+                path: d.path.clone(),
+                enabled: d.enabled,
+                language: d.language,
+                dictionary: d.dictionary.reopen()?,
+            });
+        }
+        Ok(Self {
+            dicts,
+            preferences: self.preferences.clone(),
+        })
+    }
+
     /// All managed dictionaries, in insertion order.
     pub fn dictionaries(&self) -> &[ManagedDictionary] {
         &self.dicts

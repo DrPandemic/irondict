@@ -176,6 +176,13 @@ enum WorkerReq {
 
 /// A message from the search worker back to the UI thread.
 enum WorkerMsg {
+    /// The dictionary set finished loading on the worker thread; this is a cheap
+    /// copy (sharing the parsed indexes) for the UI thread's synchronous lookups,
+    /// sent before the search index is opened so the UI can populate the moment
+    /// the parse completes — the window itself is already on screen.
+    ManagerReady {
+        manager: Box<DictionaryManager>,
+    },
     Results {
         gen: u64,
         results: Box<RenderedResults>,
@@ -307,12 +314,25 @@ fn prepare_engine(
 }
 
 /// The search worker: owns its own manager + index and serves search/lookup work
-/// off the UI thread. It builds the index first (reporting `IndexReady` or
-/// `BuildError`), then processes requests until the UI drops the request channel
-/// or sends `Shutdown`. The manager is reloaded from the saved config on
-/// `Reload`, and the index rebuilt when the dictionary set changed.
+/// off the UI thread. It loads the dictionary set itself (the heavy
+/// `.idx`/`.syn` parse happens here, off the UI thread, so the window can appear
+/// instantly) and immediately hands the UI a cheap `reopen`ed copy sharing that
+/// parse via `ManagerReady`. It then builds/opens the index (reporting
+/// `IndexReady` or `BuildError`) and processes requests until the UI drops the
+/// request channel or sends `Shutdown`. The manager is reloaded from the saved
+/// config on `Reload`, and the index rebuilt when the dictionary set changed.
 fn run_worker(req_rx: mpsc::Receiver<WorkerReq>, resp_tx: mpsc::Sender<WorkerMsg>) {
     let mut manager = load_manager();
+    // Hand the UI thread a copy sharing this one parse, so it can do synchronous
+    // lookups without reparsing. Falls back to a fresh parse only if reopening
+    // somehow fails, so the UI never gets stuck on the loading screen.
+    let ui_copy = manager.reopen().unwrap_or_else(|e| {
+        eprintln!("warning: sharing the loaded dictionaries with the UI failed ({e}); reparsing");
+        load_manager()
+    });
+    let _ = resp_tx.send(WorkerMsg::ManagerReady {
+        manager: Box::new(ui_copy),
+    });
     let mut engine: Option<SearchEngine> = None;
     // A control request pulled off the channel while a build was running, to be
     // handled before blocking for the next one.
@@ -438,7 +458,22 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
     // The accent (indigo) and light default live in the .slint; the OS values are
     // detected and applied below, off the startup path.
 
-    let manager = Rc::new(RefCell::new(load_manager()));
+    // Boot instantly: start with no dictionaries loaded. The expensive
+    // `.idx`/`.syn` parse runs on the search-worker thread, which hands back a
+    // cheap shared copy (`WorkerMsg::ManagerReady`) once done — so the window
+    // appears immediately instead of after a multi-second parse.
+    let manager = Rc::new(RefCell::new(DictionaryManager::new()));
+    // The dictionary set isn't loaded yet, but its preferences (theme, accent)
+    // live in the config and are cheap to read, so apply them now for a correct
+    // first paint rather than flashing the default theme.
+    if let Some(prefs) = Config::default_path()
+        .ok()
+        .filter(|p| p.exists())
+        .and_then(|p| Config::load_from(&p).ok())
+        .map(|c| c.preferences)
+    {
+        *manager.borrow_mut().preferences_mut() = prefs;
+    }
     let results_model: Rc<VecModel<ResultItem>> = Rc::new(VecModel::default());
     ui.set_results(ModelRc::from(results_model.clone()));
     let blocks_model: Rc<VecModel<DefBlock>> = Rc::new(VecModel::default());
@@ -469,68 +504,25 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
         ui.set_accent_choice(accent_choice_index(&prefs));
     }
 
-    // Pick the active dictionary scope (refresh_lists reset it to "All").
-    match scope.as_deref() {
-        // Launched scoped to one dictionary (e.g. a per-language launcher trigger):
-        // select it so both the lookup and the result list stay within that dict.
-        // Falls back to "All" if the name no longer matches an enabled dictionary.
-        Some(name) => ui.set_scope(scope_index_for(&manager, Some(name))),
-        // Opened with a word but no scope (the all-dictionaries launcher trigger):
-        // keep "All" so the lookup spans every dictionary.
-        None if initial.is_some() => {}
-        // Normal launch: restore the last-used scope.
-        None => {
-            let last = manager.borrow().preferences().last_scope.clone();
-            ui.set_scope(scope_index_for(&manager, last.as_deref()));
-        }
-    }
-
-    // Apply the theme (persisted override, else OS detection) without blocking
-    // startup.
+    // Apply the theme (persisted override, else OS detection) from the cheaply
+    // loaded preferences, without blocking startup.
     apply_appearance(&ui, &manager);
 
-    // Word of the moment: one fixed seed per launch, but the actual word is drawn
-    // from whichever dictionary the active scope selects (so it follows the chosen
-    // dictionary). Shown immediately, before the index is ready.
+    // One fixed "word of the moment" seed per launch. The actual word is drawn
+    // once the dictionaries finish loading (see `apply_loaded_manager`), so the
+    // seed just needs to be stable across that and any later scope changes.
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos() as usize)
         .unwrap_or(0);
-    match initial.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
-        // Opened with a word (e.g. from a launcher): show its definition straight
-        // away, and seed the search box so the result list fills with that word
-        // selected once the index is ready (the IndexReady handler re-runs the
-        // current query). `navigate` renders without the index, so the definition
-        // is on screen immediately.
-        Some(word) => {
-            ui.set_query(word.into());
-            // Render the definition from the active scope's dictionary (the one
-            // `--dict` selected, or none for "All"), so a per-language launcher
-            // trigger lands on that dictionary's entry.
-            let filter = scope_filter(ui.get_scope(), &manager);
-            navigate(
-                &ui,
-                &manager,
-                &blocks_model,
-                &history,
-                word,
-                "",
-                filter.as_deref(),
-            );
-        }
-        None => {
-            let (wotm, wotm_src) = word_of_the_moment(&manager, ui.get_scope(), seed);
-            navigate(
-                &ui,
-                &manager,
-                &blocks_model,
-                &history,
-                &wotm,
-                "WORD OF THE MOMENT",
-                wotm_src.as_deref(),
-            );
-        }
-    }
+    // Until the background load finishes, show a brief loading page rather than a
+    // blank pane. `apply_loaded_manager` replaces it (with the launcher word or
+    // the word of the moment) the instant `ManagerReady` arrives.
+    apply_page(
+        &ui,
+        &blocks_model,
+        &message_page("", "Loading dictionaries…", "One moment."),
+    );
 
     // Spin up the search worker. It builds/opens the index and runs every search
     // and first-result render off the UI thread, so typing never blocks. Requests
@@ -559,6 +551,8 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
         let req_tx = req_tx.clone();
         let gen = gen.clone();
         let build_gen = build_gen.clone();
+        let dict_items = dict_items.clone();
+        let scopes = scopes.clone();
         // When the current index build began, so the time-remaining estimate can
         // extrapolate from the elapsed time. `None` between builds.
         let mut build_start: Option<Instant> = None;
@@ -566,6 +560,22 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
             while let Ok(msg) = resp_rx.try_recv() {
                 let ui = ui_weak.unwrap();
                 match msg {
+                    WorkerMsg::ManagerReady { manager: loaded } => {
+                        // The background load finished: adopt the real dictionary
+                        // set and populate the UI (lists, scope, first page).
+                        *manager.borrow_mut() = *loaded;
+                        apply_loaded_manager(
+                            &ui,
+                            &manager,
+                            &dict_items,
+                            &scopes,
+                            &blocks_model,
+                            &history,
+                            initial.as_deref(),
+                            scope.as_deref(),
+                            seed,
+                        );
+                    }
                     WorkerMsg::Results { gen: g, results } => {
                         if g == gen.get() {
                             apply_results(
@@ -1327,6 +1337,73 @@ fn save_config(manager: &Rc<RefCell<DictionaryManager>>) {
 /// Rebuild the scope control (All + enabled dictionaries) and the settings
 /// dictionary list from the manager, resetting the active scope to All since the
 /// indices may have shifted.
+/// Populate the UI from the freshly-loaded dictionary set once the background
+/// load finishes: rebuild the scope/settings lists and theme choices, restore
+/// the active scope, and render the first page (the launcher word, or the word of
+/// the moment). Until this runs the window is already on screen showing a loading
+/// page, so all the dictionary-dependent work is deferred to here.
+#[allow(clippy::too_many_arguments)]
+fn apply_loaded_manager(
+    ui: &AppWindow,
+    manager: &Rc<RefCell<DictionaryManager>>,
+    dict_items: &Rc<VecModel<DictRow>>,
+    scopes: &Rc<VecModel<SharedString>>,
+    blocks_model: &Rc<VecModel<DefBlock>>,
+    history: &Rc<RefCell<NavHistory>>,
+    initial: Option<&str>,
+    scope: Option<&str>,
+    seed: usize,
+) {
+    refresh_lists(ui, manager, dict_items, scopes);
+    {
+        let prefs = manager.borrow().preferences().clone();
+        ui.set_theme_mode(theme_mode_index(prefs.theme_mode));
+        ui.set_accent_choice(accent_choice_index(&prefs));
+    }
+    apply_appearance(ui, manager);
+
+    // Pick the active dictionary scope (refresh_lists reset it to "All").
+    match scope {
+        // Launched scoped to one dictionary (e.g. a per-language launcher trigger).
+        // Falls back to "All" if the name no longer matches an enabled dictionary.
+        Some(name) => ui.set_scope(scope_index_for(manager, Some(name))),
+        // Opened with a word but no scope: keep "All" so the lookup spans every
+        // dictionary.
+        None if initial.is_some() => {}
+        // Normal launch: restore the last-used scope.
+        None => {
+            let last = manager.borrow().preferences().last_scope.clone();
+            ui.set_scope(scope_index_for(manager, last.as_deref()));
+        }
+    }
+
+    match initial.map(str::trim).filter(|w| !w.is_empty()) {
+        // Opened with a word (e.g. from a launcher): show its definition and seed
+        // the search box so the result list fills with it once the index is ready.
+        Some(word) => {
+            ui.set_query(word.into());
+            let filter = scope_filter(ui.get_scope(), manager);
+            navigate(ui, manager, blocks_model, history, word, "", filter.as_deref());
+        }
+        // No launcher word: show the word of the moment, but only if the user
+        // hasn't already started typing while the dictionaries were loading.
+        None => {
+            if ui.get_query().trim().is_empty() {
+                let (wotm, wotm_src) = word_of_the_moment(manager, ui.get_scope(), seed);
+                navigate(
+                    ui,
+                    manager,
+                    blocks_model,
+                    history,
+                    &wotm,
+                    "WORD OF THE MOMENT",
+                    wotm_src.as_deref(),
+                );
+            }
+        }
+    }
+}
+
 fn refresh_lists(
     ui: &AppWindow,
     manager: &Rc<RefCell<DictionaryManager>>,
