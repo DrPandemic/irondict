@@ -2726,6 +2726,8 @@ name = "irondict-core"
 version = "0.6.0"
 dependencies = [
  "directories",
+ "flate2",
+ "memmap2",
  "rayon",
  "ruzstd",
  "serde",

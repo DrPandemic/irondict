@@ -1,6 +1,7 @@
 pub mod config;
 pub mod conjugation;
 pub mod download;
+mod idx;
 pub mod manager;
 pub mod model;
 pub mod search;

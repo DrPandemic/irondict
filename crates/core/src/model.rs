@@ -2,8 +2,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use stardict::dict::Dict;
-use stardict::idx::Idx;
 use stardict::Ifo;
+
+use crate::idx::Index;
 
 #[derive(Debug, Clone)]
 pub struct DefinitionSegment {
@@ -33,7 +34,7 @@ pub struct DictionaryInfo {
 /// its own.
 pub(crate) struct SharedDict {
     pub(crate) ifo: Ifo,
-    pub(crate) idx: Idx,
+    pub(crate) idx: Index,
     pub(crate) dict_path: PathBuf,
     pub(crate) dict_bz: bool,
 }

@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use stardict::dict::Dict;
-use stardict::idx::Idx;
 use stardict::Ifo;
 
+use crate::idx::Index;
 use crate::model::{DefinitionSegment, Dictionary, DictionaryInfo, Entry, SharedDict};
 
 fn to_entry(word: stardict::WordDefinition) -> Entry {
@@ -61,9 +61,11 @@ pub fn load(path: &Path) -> Result<Dictionary, crate::Error> {
     let syn = syn_path.is_file().then_some(syn_path);
 
     let ifo = Ifo::new(path.to_path_buf()).map_err(|e| crate::Error::Stardict(e.into()))?;
-    // The expensive step: parses the whole `.idx` (and `.syn`, if present) into
-    // in-memory maps. Parsed once here and shared via the returned `Arc`.
-    let idx = Idx::new(idx_path, &ifo, idx_gz, syn).map_err(|e| crate::Error::Stardict(e.into()))?;
+    // Parse the `.idx` (headword → blocks) eagerly; this is needed for every
+    // lookup and is cheap. The `.syn` is only memory-mapped here, not parsed —
+    // it is binary-searched on demand (see [`crate::idx`]), so a large synonym
+    // file no longer costs ~1s of startup. Shared via the returned `Arc`.
+    let idx = Index::new(&idx_path, &ifo, idx_gz, syn.as_deref())?;
     let dict =
         Dict::new(dict_path.clone(), dict_bz).map_err(|e| crate::Error::Stardict(e.into()))?;
 
@@ -93,7 +95,7 @@ impl Dictionary {
         let ifo = &self.shared.ifo;
         let dict = &mut self.dict;
         let mut defs = Vec::with_capacity(blocks.len());
-        for block in blocks {
+        for block in &blocks {
             if let Some(word) = dict
                 .get_definition(block, ifo)
                 .map_err(|e| crate::Error::Stardict(e.into()))?
@@ -108,12 +110,7 @@ impl Dictionary {
     /// internal order. Used to pick a "word of the moment" without materializing
     /// every entry. Returns `None` only for an empty dictionary.
     pub fn nth_headword(&self, n: usize) -> Option<String> {
-        let items = &self.shared.idx.items;
-        let len = items.len();
-        if len == 0 {
-            return None;
-        }
-        items.values().nth(n % len).map(|e| e.word.clone())
+        self.shared.idx.nth_word(n)
     }
 
     /// Iterate every entry in the dictionary, calling `f` with each headword and
@@ -133,17 +130,27 @@ impl Dictionary {
         // reader as disjoint fields so we can read every block while filling
         // definitions.
         let ifo = &self.shared.ifo;
+        let idx = &self.shared.idx;
         let dict = &mut self.dict;
-        for idx_entry in self.shared.idx.items.values() {
-            if let Some(word) = dict
-                .get_definition(idx_entry, ifo)
-                .map_err(|e| crate::Error::Stardict(e.into()))?
-            {
-                if f(to_entry(word)).is_break() {
-                    break;
+        let mut error = None;
+        idx.for_each_word(|idx_entry| {
+            match dict.get_definition(&idx_entry, ifo) {
+                Ok(Some(word)) => {
+                    if f(to_entry(word)).is_break() {
+                        return ControlFlow::Break(());
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    error = Some(crate::Error::Stardict(e.into()));
+                    return ControlFlow::Break(());
                 }
             }
+            ControlFlow::Continue(())
+        });
+        match error {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
-        Ok(())
     }
 }
