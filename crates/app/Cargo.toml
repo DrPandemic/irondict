@@ -8,7 +8,10 @@ license.workspace = true
 irondict-core = { path = "../core" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+directories = "5"
 regex = "1.12.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 slint = "1"
 zbus = "5.16.0"

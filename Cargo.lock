@@ -2713,9 +2713,12 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
+ "directories",
  "irondict-core",
  "regex",
  "rfd",
+ "serde",
+ "serde_json",
  "slint",
  "slint-build",
  "zbus",

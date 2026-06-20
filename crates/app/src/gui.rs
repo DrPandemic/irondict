@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use slint::private_unstable_api::re_exports::{parse_markdown, StyledText};
 use slint::{Color, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
@@ -41,6 +42,11 @@ struct RowData {
     headword: String,
 }
 
+/// The word of the moment shown this session: its headword and the source
+/// dictionary to scope the lookup to (`None` = any). Held in a cell so the
+/// cleared-search and scope-change handlers stay in sync on what to show.
+type SessionWotm = Rc<RefCell<Option<(String, Option<String>)>>>;
+
 // ---- threaded search/render pipeline ----
 //
 // The expensive work — the tantivy query, the disk read of the full entry, HTML
@@ -62,6 +68,7 @@ struct RenderedItem {
 /// One definition body block, with the markdown source (cross-reference links)
 /// kept as a plain string; the (non-`Send`) styled text is parsed on the UI
 /// thread in `apply_page`.
+#[derive(Serialize, Deserialize)]
 struct RenderedBlock {
     marker: String,
     text: String,
@@ -115,17 +122,20 @@ impl BlockSpec {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 struct RenderedConjForm {
     label: String,
     text: String,
 }
 
+#[derive(Serialize, Deserialize)]
 struct RenderedConjSection {
     label: String,
     forms: Vec<RenderedConjForm>,
 }
 
 /// The body of a rendered page: either a real entry or a plain message.
+#[derive(Serialize, Deserialize)]
 enum PageBody {
     Entry {
         pron: String,
@@ -139,6 +149,7 @@ enum PageBody {
 }
 
 /// A fully-computed definition page, ready for `apply_page` to push into the UI.
+#[derive(Serialize, Deserialize)]
 struct RenderedPage {
     section_label: String,
     /// The `def-headword` line — the entry's headword, or a message title.
@@ -508,21 +519,27 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
     // loaded preferences, without blocking startup.
     apply_appearance(&ui, &manager);
 
-    // One fixed "word of the moment" seed per launch. The actual word is drawn
-    // once the dictionaries finish loading (see `apply_loaded_manager`), so the
-    // seed just needs to be stable across that and any later scope changes.
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as usize)
-        .unwrap_or(0);
-    // Until the background load finishes, show a brief loading page rather than a
-    // blank pane. `apply_loaded_manager` replaces it (with the launcher word or
-    // the word of the moment) the instant `ManagerReady` arrives.
-    apply_page(
-        &ui,
-        &blocks_model,
-        &message_page("", "Loading dictionaries…", "One moment."),
-    );
+    // The word of the moment is *chosen at the previous launch* and rendered to a
+    // cache file, so this launch can show it instantly — before the dictionaries
+    // finish loading in the background. That's the boot cheat: no "loading" page,
+    // the window comes up already showing a real word. `seed` only matters as a
+    // fallback for drawing a word live (first launch, scope changes).
+    let seed = random_seed();
+    // The word shown this session. Seeded from the cached page so clearing the
+    // search box returns to the same word; scope changes refresh it.
+    let session_wotm: SessionWotm = Rc::new(RefCell::new(None));
+    match load_cached_wotm() {
+        // The previous launch's pick: show it immediately, with no hint that the
+        // dictionaries are still loading.
+        Some(page) => {
+            *session_wotm.borrow_mut() = wotm_identity(&page);
+            apply_page(&ui, &blocks_model, &page);
+        }
+        // First launch (or a cleared cache): nothing cached yet. Leave the pane
+        // blank rather than advertising the load; `apply_loaded_manager` fills in
+        // the word the instant the dictionaries are ready.
+        None => apply_page(&ui, &blocks_model, &message_page("", "", "")),
+    }
 
     // Spin up the search worker. It builds/opens the index and runs every search
     // and first-result render off the UI thread, so typing never blocks. Requests
@@ -553,6 +570,7 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
         let build_gen = build_gen.clone();
         let dict_items = dict_items.clone();
         let scopes = scopes.clone();
+        let session_wotm = session_wotm.clone();
         // When the current index build began, so the time-remaining estimate can
         // extrapolate from the elapsed time. `None` between builds.
         let mut build_start: Option<Instant> = None;
@@ -571,6 +589,7 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
                             &scopes,
                             &blocks_model,
                             &history,
+                            &session_wotm,
                             initial.as_deref(),
                             scope.as_deref(),
                             seed,
@@ -668,6 +687,7 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
         let rows = rows.clone();
         let req_tx = req_tx.clone();
         let gen = gen.clone();
+        let session_wotm = session_wotm.clone();
         // Debounce: defer the search until the user pauses, instead of dispatching
         // one on every keystroke. The search itself runs on the worker thread.
         let debounce = Rc::new(Timer::default());
@@ -681,7 +701,17 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
                 results_model.set_vec(Vec::new());
                 rows.borrow_mut().clear();
                 ui.set_selected_index(-1);
-                let (wotm, wotm_src) = word_of_the_moment(&manager, ui.get_scope(), seed);
+                // Return to the session's word of the moment (the one booted on),
+                // drawing one live only if the session hasn't picked one yet.
+                let cached = session_wotm.borrow().clone();
+                let (wotm, wotm_src) = match cached {
+                    Some(p) => p,
+                    None => {
+                        let p = word_of_the_moment(&manager, ui.get_scope(), seed);
+                        *session_wotm.borrow_mut() = Some(p.clone());
+                        p
+                    }
+                };
                 navigate(
                     &ui,
                     &manager,
@@ -784,6 +814,7 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
         let history = history.clone();
         let req_tx = req_tx.clone();
         let gen = gen.clone();
+        let session_wotm = session_wotm.clone();
         ui.on_scope_changed(move |idx| {
             let ui = ui_weak.unwrap();
             // Ignore out-of-range scopes (e.g. Ctrl+5 with only two dictionaries).
@@ -801,6 +832,7 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
             if q.trim().is_empty() {
                 // The word of the moment follows the newly-selected dictionary.
                 let (wotm, wotm_src) = word_of_the_moment(&manager, idx, seed);
+                *session_wotm.borrow_mut() = Some((wotm.clone(), wotm_src.clone()));
                 navigate(
                     &ui,
                     &manager,
@@ -819,6 +851,9 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
                     scope,
                 });
             }
+            // Keep the next-launch word aligned with the now-selected dictionary,
+            // which is also what the next launch will restore as its scope.
+            cache_next_wotm(&manager, idx);
         });
     }
 
@@ -1350,6 +1385,7 @@ fn apply_loaded_manager(
     scopes: &Rc<VecModel<SharedString>>,
     blocks_model: &Rc<VecModel<DefBlock>>,
     history: &Rc<RefCell<NavHistory>>,
+    session_wotm: &SessionWotm,
     initial: Option<&str>,
     scope: Option<&str>,
     seed: usize,
@@ -1385,11 +1421,13 @@ fn apply_loaded_manager(
             let filter = scope_filter(ui.get_scope(), manager);
             navigate(ui, manager, blocks_model, history, word, "", filter.as_deref());
         }
-        // No launcher word: show the word of the moment, but only if the user
-        // hasn't already started typing while the dictionaries were loading.
+        // No launcher word: the window is already showing the word of the moment
+        // the previous launch cached. Only draw one here if there was nothing to
+        // show (first launch / cleared cache) and the user hasn't started typing.
         None => {
-            if ui.get_query().trim().is_empty() {
+            if session_wotm.borrow().is_none() && ui.get_query().trim().is_empty() {
                 let (wotm, wotm_src) = word_of_the_moment(manager, ui.get_scope(), seed);
+                *session_wotm.borrow_mut() = Some((wotm.clone(), wotm_src.clone()));
                 navigate(
                     ui,
                     manager,
@@ -1402,6 +1440,10 @@ fn apply_loaded_manager(
             }
         }
     }
+
+    // Now that the dictionaries are loaded, pick and render the word the *next*
+    // launch will show, scoped to the dictionary this launch restored.
+    cache_next_wotm(manager, ui.get_scope());
 }
 
 fn refresh_lists(
@@ -1535,6 +1577,70 @@ fn group_thousands(n: usize) -> String {
         out.push(*b as char);
     }
     out
+}
+
+/// A fresh, effectively-random seed for drawing a word of the moment.
+fn random_seed() -> usize {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize)
+        .unwrap_or(0)
+}
+
+/// Path to the cached word-of-the-moment page: a rendered page the *previous*
+/// launch picked, so this launch can show it before the dictionaries finish
+/// loading. Lives in the cache dir alongside the index/`.idx` caches.
+fn wotm_cache_path() -> Option<PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "irondict")?;
+    Some(dirs.cache_dir().join("wotm.json"))
+}
+
+/// Load the word of the moment the previous launch cached, if any.
+fn load_cached_wotm() -> Option<RenderedPage> {
+    let bytes = std::fs::read(wotm_cache_path()?).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Cache a rendered word-of-the-moment page for the next launch to show. Best
+/// effort: failures (no cache dir, write error) are ignored — the next launch
+/// just falls back to a blank pane until the dictionaries load.
+fn save_cached_wotm(page: &RenderedPage) {
+    let Some(path) = wotm_cache_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(bytes) = serde_json::to_vec(page) {
+        let _ = std::fs::write(path, bytes);
+    }
+}
+
+/// The (headword, source) a cached entry page looks up, or `None` for a
+/// non-entry (message) page. Lets the session reuse the cached word so clearing
+/// the search box returns to the same word it booted on.
+fn wotm_identity(page: &RenderedPage) -> Option<(String, Option<String>)> {
+    match page.body {
+        PageBody::Entry { .. } => Some((
+            page.headword.clone(),
+            (!page.source.is_empty()).then(|| page.source.clone()),
+        )),
+        PageBody::Message { .. } => None,
+    }
+}
+
+/// Draw and render a fresh word of the moment for `scope`, then cache it for the
+/// *next* launch — the "chosen at the previous boot" half of the boot cheat. The
+/// current launch never blocks on this; it runs once the dictionaries are loaded.
+fn cache_next_wotm(manager: &Rc<RefCell<DictionaryManager>>, scope: i32) {
+    let (word, src) = word_of_the_moment(manager, scope, random_seed());
+    let page = compute_page(
+        &mut manager.borrow_mut(),
+        &word,
+        "WORD OF THE MOMENT",
+        src.as_deref(),
+    );
+    save_cached_wotm(&page);
 }
 
 /// Pick the "word of the moment" for the active `scope`: a stable-per-launch
