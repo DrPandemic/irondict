@@ -9,7 +9,7 @@ license=('GPL-3.0-or-later')
 makedepends=('cargo')
 optdepends=('albert: launcher integration ("d word" to search the dictionaries)')
 source=("https://github.com/DrPandemic/irondict/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('7533759dbc82a8fa6cc18d6d0da437e3acf2abbcbf926f341bd8c7d148974791')
 
 prepare() {
   cd "$srcdir/$pkgname-$pkgver"
