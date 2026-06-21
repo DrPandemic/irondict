@@ -22,6 +22,24 @@ use irondict_core::{
     IndexProgress, Language, Preferences, Progress, SearchEngine, SearchMode, ThemeMode,
 };
 
+/// Emit a timing line when IRON_DICT_TIMING=1. Centralised so the measurements
+/// can be toggled in one place without scattering conditionals across the UI
+/// hot path.
+fn timing_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("IRON_DICT_TIMING")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+fn timing(label: &str, start: Instant) {
+    if timing_enabled() {
+        eprintln!("[timing] {label}: {:?}", start.elapsed());
+    }
+}
+
 /// Preset accent swatches offered in the settings page, in display order. Index
 /// `n` here corresponds to `accent-choice == n + 1` in the UI (choice 0 = Auto).
 const ACCENT_SWATCHES: [(u8, u8, u8); 6] = [
@@ -181,6 +199,11 @@ enum WorkerReq {
     /// changed). `gen` tags that rebuild so the UI can drop index messages from a
     /// superseded build (only meaningful when `rebuild` is set).
     Reload { rebuild: bool, gen: u64 },
+    /// Pick and render the next-launch word-of-the-moment page so it can be
+    /// cached to disk. Runs on the worker because the underlying dictionary read
+    /// hits a cold OS page cache at startup and would otherwise stall the UI
+    /// thread for ~100 ms while the user is already typing.
+    CacheNextWotm { scope: i32 },
     /// Stop the worker (on shutdown).
     Shutdown,
 }
@@ -197,6 +220,11 @@ enum WorkerMsg {
     Results {
         gen: u64,
         results: Box<RenderedResults>,
+    },
+    /// A rendered word-of-the-moment page, ready to be persisted to the cache so
+    /// the next launch can show it before the dictionaries finish loading.
+    WotmCached {
+        page: Box<RenderedPage>,
     },
     /// A search arrived before the index was ready.
     NoEngine {
@@ -399,6 +427,19 @@ fn run_worker(req_rx: mpsc::Receiver<WorkerReq>, resp_tx: mpsc::Sender<WorkerMsg
                     );
                 }
             }
+            WorkerReq::CacheNextWotm { scope } => {
+                // Render the next-launch WOTM page off the UI thread. The
+                // dictionary read here hits the cold OS page cache at startup
+                // (the worker has only just finished the initial index build,
+                // which reads the headword index — not the entries themselves),
+                // so this can take ~100 ms; doing it here keeps the UI thread
+                // free to keep accepting keystrokes.
+                let (word, src) = word_of_the_moment_off(&manager, scope);
+                let page = compute_page(&mut manager, &word, "WORD OF THE MOMENT", src.as_deref());
+                let _ = resp_tx.send(WorkerMsg::WotmCached {
+                    page: Box::new(page),
+                });
+            }
             WorkerReq::Shutdown => break,
         }
     }
@@ -422,6 +463,11 @@ fn rebuild_index(
             Ok(WorkerReq::Search { gen, .. }) => {
                 let _ = resp_tx.send(WorkerMsg::NoEngine { gen });
             }
+            // `CacheNextWotm` is a low-priority background task: it must not
+            // supersede the in-flight build (that would loop forever if the UI
+            // re-sends it on every launch), so drop it here and let the worker
+            // pick it up after the build completes via the regular recv loop.
+            Ok(WorkerReq::CacheNextWotm { .. }) => continue,
             Ok(other) => {
                 *pending = Some(other);
                 return true;
@@ -464,7 +510,11 @@ fn warm_up(engine: &SearchEngine) {
 
 /// Launch the graphical front-end and run the Slint event loop until the window
 /// is closed.
-pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::PlatformError> {
+pub fn run(
+    initial: Option<String>,
+    scope: Option<String>,
+    autotype: Option<String>,
+) -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     // The accent (indigo) and light default live in the .slint; the OS values are
     // detected and applied below, off the startup path.
@@ -590,6 +640,7 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
                             &blocks_model,
                             &history,
                             &session_wotm,
+                            &req_tx,
                             initial.as_deref(),
                             scope.as_deref(),
                             seed,
@@ -671,6 +722,14 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
                             &blocks_model,
                             &message_page("", "Couldn't build index", &msg),
                         );
+                    }
+                    WorkerMsg::WotmCached { page } => {
+                        // The worker rendered the next-launch word-of-the-moment
+                        // page off-thread; persist it so the next launch can
+                        // show it instantly. The disk write is fast (~60µs); we
+                        // do it on the UI thread only because save_cached_wotm
+                        // already lives here.
+                        save_cached_wotm(&page);
                     }
                 }
             }
@@ -1198,13 +1257,85 @@ pub fn run(initial: Option<String>, scope: Option<String>) -> Result<(), slint::
         });
     }
 
+    let autotype_timer = autotype.map(|q| autotype_after_index_ready(ui.as_weak(), q));
+
     let r = ui.run();
     // Stop the timers and ask the worker to exit so the process winds down cleanly.
     drop(resp_timer);
     drop(add_timer);
     drop(dl_timer);
+    drop(autotype_timer);
     let _ = req_tx.send(WorkerReq::Shutdown);
     r
+}
+
+/// Auto-type a query into the search box via synthetic key events, so a developer
+/// can measure the typing path without needing a real keyboard. Returns the
+/// timer it created — the caller MUST hold it until the event loop ends,
+/// because `Timer::drop` removes the registered callback.
+fn autotype_after_index_ready(ui_weak: slint::Weak<AppWindow>, query: String) -> Rc<Timer> {
+    let gap_ms: u64 = std::env::var("IRON_DICT_AUTOTYPE_GAP_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(60);
+    // Default delay leaves the worker time to finish the first index build on a
+    // cold cache. Override with IRON_DICT_AUTOTYPE_DELAY_MS.
+    let delay_ms: u64 = std::env::var("IRON_DICT_AUTOTYPE_DELAY_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8000);
+
+    let chars: Vec<char> = query.chars().collect();
+    let weak = ui_weak.clone();
+    let driver = Rc::new(Timer::default());
+    let idx = Rc::new(Cell::new(0usize));
+    // Start as a long-interval repeating timer; the first fire waits the
+    // pre-typing delay, then subsequent fires happen at the per-char gap.
+    let first_fire = Rc::new(Cell::new(true));
+    let driver_c = driver.clone();
+    let chars_c = chars.clone();
+    let idx_c = idx.clone();
+    let first_c = first_fire.clone();
+    let gap = Duration::from_millis(gap_ms);
+    driver.start(
+        TimerMode::Repeated,
+        Duration::from_millis(delay_ms),
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if timing_enabled() {
+                let i = idx_c.get();
+                eprintln!(
+                    "[autotype] fire idx={i} chars_left={} elapsed_ms={:?}",
+                    chars_c.len().saturating_sub(i),
+                    driver_c.interval(),
+                );
+            }
+            if first_c.get() {
+                first_c.set(false);
+                // Switch to the per-char gap so typing pace is steady.
+                driver_c.set_interval(gap);
+                if timing_enabled() {
+                    eprintln!(
+                        "[autotype] typing {} chars with {gap_ms}ms gap",
+                        chars_c.len()
+                    );
+                }
+            }
+            let i = idx_c.get();
+            if i >= chars_c.len() {
+                driver_c.stop();
+                if timing_enabled() {
+                    eprintln!("[autotype] done typing");
+                }
+                return;
+            }
+            let text: slint::SharedString = chars_c[i].to_string().into();
+            ui.window()
+                .dispatch_event(slint::platform::WindowEvent::KeyPressed { text: text.clone() });
+            idx_c.set(i + 1);
+        },
+    );
+    driver
 }
 
 /// A message from a dictionary-download worker thread back to the UI thread.
@@ -1386,10 +1517,12 @@ fn apply_loaded_manager(
     blocks_model: &Rc<VecModel<DefBlock>>,
     history: &Rc<RefCell<NavHistory>>,
     session_wotm: &SessionWotm,
+    req_tx: &Rc<mpsc::Sender<WorkerReq>>,
     initial: Option<&str>,
     scope: Option<&str>,
     seed: usize,
 ) {
+    let alm_start = Instant::now();
     refresh_lists(ui, manager, dict_items, scopes);
     {
         let prefs = manager.borrow().preferences().clone();
@@ -1419,7 +1552,15 @@ fn apply_loaded_manager(
         Some(word) => {
             ui.set_query(word.into());
             let filter = scope_filter(ui.get_scope(), manager);
-            navigate(ui, manager, blocks_model, history, word, "", filter.as_deref());
+            navigate(
+                ui,
+                manager,
+                blocks_model,
+                history,
+                word,
+                "",
+                filter.as_deref(),
+            );
         }
         // No launcher word: the window is already showing the word of the moment
         // the previous launch cached. Only draw one here if there was nothing to
@@ -1442,8 +1583,18 @@ fn apply_loaded_manager(
     }
 
     // Now that the dictionaries are loaded, pick and render the word the *next*
-    // launch will show, scoped to the dictionary this launch restored.
-    cache_next_wotm(manager, ui.get_scope());
+    // launch will show, scoped to the dictionary this launch restored. Doing
+    // this on the worker thread avoids a ~100ms UI-thread stall: `cache_next_wotm`
+    // reads the dictionary entry from disk (cold OS page cache at this point in
+    // startup, since the worker has not yet finished indexing) and parses the
+    // HTML/markdown, which would otherwise block keystrokes queued while the user
+    // was already typing into the freshly-shown window.
+    let r2 = Instant::now();
+    let _ = req_tx.send(WorkerReq::CacheNextWotm {
+        scope: ui.get_scope(),
+    });
+    timing("apply_loaded_manager: cache_next_wotm (sent)", r2);
+    timing("apply_loaded_manager TOTAL", alm_start);
 }
 
 fn refresh_lists(
@@ -1662,6 +1813,28 @@ fn word_of_the_moment(
     } else {
         enabled.nth(scope as usize - 1)
     };
+    dict.and_then(|d| {
+        d.dictionary
+            .nth_headword(seed)
+            .map(|w| (w, Some(d.name().to_string())))
+    })
+    .unwrap_or_else(|| ("IronDict".to_string(), None))
+}
+
+/// Like [`word_of_the_moment`] but takes `&DictionaryManager` so it can be
+/// called from a non-`Rc` context (the search worker owns its manager by value).
+/// Uses its own `random_seed()` since the worker is already past UI boot.
+fn word_of_the_moment_off(manager: &DictionaryManager, scope: i32) -> (String, Option<String>) {
+    let mut enabled = manager
+        .dictionaries()
+        .iter()
+        .filter(|d| d.enabled && !is_companion_dict(&d.path));
+    let dict = if scope <= 0 {
+        enabled.next()
+    } else {
+        enabled.nth(scope as usize - 1)
+    };
+    let seed = random_seed();
     dict.and_then(|d| {
         d.dictionary
             .nth_headword(seed)
@@ -1906,7 +2079,10 @@ fn compute_page(
             indent: 0,
             conj: true,
         };
-        match blocks.iter().position(|b| b.heading && pos_is_verb(&b.text)) {
+        match blocks
+            .iter()
+            .position(|b| b.heading && pos_is_verb(&b.text))
+        {
             Some(idx) => blocks.insert(idx + 1, button),
             None => blocks.push(button),
         }
@@ -2127,7 +2303,16 @@ fn compute_search(
         .collect();
 
     if let Some(first) = hits.first() {
+        let t0 = Instant::now();
         let page = compute_page(manager, &first.headword, "", filter);
+        if timing_enabled() {
+            eprintln!(
+                "[timing] worker.compute_page for {:?}: {:?} ({} hits, needle={needle:?})",
+                first.headword,
+                t0.elapsed(),
+                hits.len(),
+            );
+        }
         RenderedResults {
             items,
             first_headword: Some(first.headword.clone()),

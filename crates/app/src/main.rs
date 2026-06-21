@@ -28,6 +28,11 @@ struct Cli {
     /// `list`). Pairs with `--word` to open it scoped to that dictionary.
     #[arg(long, value_name = "NAME")]
     dict: Option<String>,
+    /// With `--gui`, auto-type this query into the search box via synthetic key
+    /// events after the index is ready, then exit. Used to profile the typing
+    /// path without a real keyboard.
+    #[arg(long, value_name = "TEXT", hide = true)]
+    autotype: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -137,7 +142,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.gui {
-        return gui::run(cli.word, cli.dict).map_err(|e| anyhow::anyhow!("running GUI: {e}"));
+        return gui::run(cli.word, cli.dict, cli.autotype)
+            .map_err(|e| anyhow::anyhow!("running GUI: {e}"));
     }
 
     match cli.command {
