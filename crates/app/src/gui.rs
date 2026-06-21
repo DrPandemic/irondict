@@ -68,13 +68,13 @@ type SessionWotm = Rc<RefCell<Option<(String, Option<String>)>>>;
 // ---- threaded search/render pipeline ----
 //
 // The expensive work — the tantivy query, the disk read of the full entry, HTML
-// stripping, snippet building and conjugation — runs on a dedicated worker
-// thread so it never blocks the UI thread while the user is typing. The worker
-// owns its own `DictionaryManager` + `SearchEngine` and produces plain,
-// `Send`-able render data; the UI thread only assembles the (non-`Send`) Slint
-// models from it. Synchronous user actions (clicks, links, back/forward) render
-// on the UI thread through the same `compute_page`/`apply_page` split, using the
-// UI's own manager.
+// stripping, snippet building, conjugation, and markdown-to-styled-text parsing
+// — runs on a dedicated worker thread so it never blocks the UI thread while the
+// user is typing. The worker owns its own `DictionaryManager` + `SearchEngine`
+// and produces `Send`-able render data (including pre-computed `StyledText`);
+// the UI thread only assembles the Slint models from it. Synchronous user
+// actions (clicks, links, back/forward) render on the UI thread through the
+// same `compute_page`/`apply_page` split, using the UI's own manager.
 
 /// One result-list row, computed off the UI thread.
 struct RenderedItem {
@@ -83,14 +83,16 @@ struct RenderedItem {
     source: String,
 }
 
-/// One definition body block, with the markdown source (cross-reference links)
-/// kept as a plain string; the (non-`Send`) styled text is parsed on the UI
-/// thread in `apply_page`.
+/// One definition body block, with both the markdown source (for plain-text
+/// selection and serialisation) and the pre-computed styled text produced on the
+/// worker thread so the UI thread never blocks on markdown parsing.
 #[derive(Serialize, Deserialize)]
 struct RenderedBlock {
     marker: String,
     text: String,
     md: String,
+    #[serde(skip, default)]
+    styled: Option<StyledText>,
     /// True for an indented example/quotation block (rendered italic + greyed).
     quote: bool,
     /// True for a section heading (a part of speech like "Verb", or
@@ -2042,10 +2044,12 @@ fn compute_page(
             } else {
                 (convert_gcide_refs_to_links(&b.text), b.text)
             };
+            let styled = parse_markdown::<StyledText>(&md, &[]);
             RenderedBlock {
                 marker: b.marker,
                 text,
                 md,
+                styled: Some(styled),
                 quote: b.quote,
                 heading: b.heading,
                 indent: b.indent,
@@ -2074,6 +2078,7 @@ fn compute_page(
             marker: String::new(),
             text: String::new(),
             md: String::new(),
+            styled: None,
             quote: false,
             heading: false,
             indent: 0,
@@ -2145,8 +2150,10 @@ fn compute_conjugation(
         .collect()
 }
 
-/// Push a computed page into the UI. This is the light half (it builds the Slint
-/// models and parses the markdown into styled text) and must run on the UI thread.
+/// Push a computed page into the UI. Assembles the Slint models on the UI
+/// thread. Markdown parsing already happened on the worker thread (via
+/// `compute_page`), so this is cheap. Falls back to parsing `md` for pages
+/// deserialized from the WOTM cache where `styled` is absent.
 fn apply_page(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, page: &RenderedPage) {
     ui.set_section_label(page.section_label.as_str().into());
     ui.set_def_headword(page.headword.as_str().into());
@@ -2179,7 +2186,10 @@ fn apply_page(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, page: &Rend
                 .map(|b| DefBlock {
                     marker: b.marker.as_str().into(),
                     text: b.text.as_str().into(),
-                    styled: parse_markdown::<StyledText>(&b.md, &[]),
+                    styled: b
+                        .styled
+                        .clone()
+                        .unwrap_or_else(|| parse_markdown::<StyledText>(&b.md, &[])),
                     quote: b.quote,
                     heading: b.heading,
                     indent: b.indent,
