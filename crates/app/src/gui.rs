@@ -162,6 +162,9 @@ enum PageBody {
         etym: String,
         blocks: Vec<RenderedBlock>,
         conjugation: Vec<RenderedConjSection>,
+        /// Localized "Conjugation" label for the button and overlay header,
+        /// matching the conjugation's language (empty when no conjugation).
+        conj_label: String,
     },
     Message {
         body: String,
@@ -2063,10 +2066,10 @@ fn compute_page(
     // like "jump"/"love"/"mouse" conjugates again, while a pure noun like "table"
     // (no verb POS) gets none. compute_conjugation stays unforced, so its
     // verb-evidence guard still vetoes a bogus grid.
-    let conjugation = if pos_is_verb(&pos) {
+    let (conjugation, conj_label) = if pos_is_verb(&pos) {
         compute_conjugation(manager, headword, &raw, &source)
     } else {
-        Vec::new()
+        (Vec::new(), String::new())
     };
 
     // The "Conjugation" button sits just under the first verb section heading, so
@@ -2102,6 +2105,7 @@ fn compute_page(
             etym,
             blocks,
             conjugation,
+            conj_label,
         },
     }
 }
@@ -2114,7 +2118,7 @@ fn compute_conjugation(
     headword: &str,
     raw: &str,
     source: &str,
-) -> Vec<RenderedConjSection> {
+) -> (Vec<RenderedConjSection>, String) {
     let language = manager
         .dictionaries()
         .iter()
@@ -2132,9 +2136,18 @@ fn compute_conjugation(
     // empty result hides the Conjugation button rather than generating a bogus
     // grid for every headword in an English dictionary.
     let Some(conj) = ConjugatorRegistry::new().conjugate(headword, def, language, false) else {
-        return Vec::new();
+        return (Vec::new(), String::new());
     };
-    conj.sections
+    // Label the button/overlay in the conjugation's own language so a French
+    // verb reads "Conjugaison", an Italian one "Coniugazione", etc.
+    let label = match conj.language {
+        Language::French => "Conjugaison",
+        Language::Italian => "Coniugazione",
+        _ => "Conjugation",
+    }
+    .to_string();
+    let sections = conj
+        .sections
         .iter()
         .map(|s| RenderedConjSection {
             label: s.label.clone(),
@@ -2147,7 +2160,8 @@ fn compute_conjugation(
                 })
                 .collect(),
         })
-        .collect()
+        .collect();
+    (sections, label)
 }
 
 /// Push a computed page into the UI. Assembles the Slint models on the UI
@@ -2178,6 +2192,7 @@ fn apply_page(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, page: &Rend
             etym,
             blocks,
             conjugation,
+            conj_label,
         } => {
             ui.set_def_pron(pron.as_str().into());
             ui.set_def_etym(etym.as_str().into());
@@ -2197,6 +2212,7 @@ fn apply_page(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, page: &Rend
                 })
                 .collect();
             blocks_model.set_vec(blocks);
+            ui.set_conj_label(conj_label.as_str().into());
             apply_conjugation(ui, conjugation);
         }
     }

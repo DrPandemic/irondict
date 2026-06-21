@@ -132,6 +132,9 @@ export component AppWindow inherits Window {
     // conjugation table (empty = the entry isn't a recognized verb). Shown only
     // on demand, in an overlay, via the button on a verb's page.
     in property <[ConjMood]> conjugation;
+    // Localized "Conjugation" word for the button/overlay, matching the verb's
+    // language (e.g. "Conjugaison" for French).
+    in property <string> conj-label: "Conjugation";
     // The selected mood tab; the overlay shows only that mood's tense sections.
     in-out property <int> conj-tab: 0;
     in-out property <bool> show-conjugation: false;
@@ -595,7 +598,7 @@ export component AppWindow inherits Window {
                                     padding-right: 14px;
                                     spacing: 6px;
                                     Text {
-                                        text: "Conjugation";
+                                        text: root.conj-label;
                                         vertical-alignment: center;
                                         font-size: 13px;
                                         font-weight: 600;
@@ -1046,7 +1049,7 @@ export component AppWindow inherits Window {
                 // header
                 HorizontalLayout {
                     Text {
-                        text: "Conjugation — " + def-headword;
+                        text: root.conj-label + " — " + def-headword;
                         font-size: 20px;
                         font-weight: 700;
                         color: text-primary;
