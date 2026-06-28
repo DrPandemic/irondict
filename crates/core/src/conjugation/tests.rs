@@ -314,14 +314,18 @@ fn html_verb_heading_counts_as_verb_evidence() {
 fn registry_routes_english() {
     let reg = ConjugatorRegistry::new();
     // Pinned English + force: a best-effort table even with no definition.
-    let conj = reg.conjugate("jump", None, Language::English, true).unwrap();
+    let conj = reg
+        .conjugate("jump", None, Language::English, true)
+        .unwrap();
     assert_eq!(conj.language, Language::English);
     let past = &find_section(&conj.sections, "Indicative past").forms;
     assert_eq!(by_label(past, "I"), "jumped");
 
     // Pinned English without force declines a word with no verb evidence, so
     // the GUI doesn't offer conjugation for every headword in an English dict.
-    assert!(reg.conjugate("jump", None, Language::English, false).is_none());
+    assert!(reg
+        .conjugate("jump", None, Language::English, false)
+        .is_none());
 
     // Auto with a GCIDE verb definition resolves to English (force ignored).
     let conj = reg

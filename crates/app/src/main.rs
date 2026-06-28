@@ -57,6 +57,9 @@ enum Command {
         /// Restrict results to this dictionary (its name as shown by `list`).
         #[arg(long, value_name = "NAME")]
         dict: Option<String>,
+        /// Include a definition snippet for each result (for front-end display).
+        #[arg(long)]
+        with_snippet: bool,
     },
     /// Conjugate a verb, sourcing forms from the loaded dictionaries.
     Conjugate {
@@ -154,7 +157,8 @@ fn main() -> Result<()> {
             mode,
             limit,
             dict,
-        }) => run_search(&query, mode.into(), limit, dict.as_deref()),
+            with_snippet,
+        }) => run_search(&query, mode.into(), limit, dict.as_deref(), with_snippet),
         Some(Command::Add { path }) => add(path),
         Some(Command::Catalog) => catalog(),
         Some(Command::Install { id }) => install(&id),
@@ -317,7 +321,13 @@ fn build_or_open_index(manager: &mut DictionaryManager) -> Result<SearchEngine> 
     SearchEngine::build(&dir, manager).context("building search index")
 }
 
-fn run_search(query: &str, mode: SearchMode, limit: usize, dict: Option<&str>) -> Result<()> {
+fn run_search(
+    query: &str,
+    mode: SearchMode,
+    limit: usize,
+    dict: Option<&str>,
+    with_snippet: bool,
+) -> Result<()> {
     let mut manager = load_manager()?;
     let engine = build_or_open_index(&mut manager)?;
     let hits = engine
@@ -330,10 +340,30 @@ fn run_search(query: &str, mode: SearchMode, limit: usize, dict: Option<&str>) -
     }
 
     for hit in hits {
-        println!(
+        let mut line = format!(
             "{}  [{}]  (score {:.2})",
             hit.headword, hit.dictionary, hit.score
         );
+        if with_snippet {
+            let snippet = manager
+                .lookup_in(&hit.dictionary, &hit.headword)
+                .ok()
+                .and_then(|entries| {
+                    entries.first().map(|e| {
+                        e.segments
+                            .first()
+                            .map(|s| s.text.as_str())
+                            .unwrap_or("")
+                            .chars()
+                            .take(100)
+                            .collect::<String>()
+                    })
+                })
+                .unwrap_or_default();
+            line.push('\t');
+            line.push_str(&snippet);
+        }
+        println!("{line}");
     }
     Ok(())
 }

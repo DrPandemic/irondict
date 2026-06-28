@@ -690,15 +690,13 @@ fn double_final_consonant(base: &str, chars: &[char]) -> Option<String> {
 /// monosyllable-only rule and the over-generation (`visit`→`*visitted`) of a
 /// blanket consonant-vowel-consonant rule.
 static POLYSYLLABIC_DOUBLERS: &[&str] = &[
-    "abet", "abhor", "acquit", "admit", "allot", "babysit", "befit", "beget",
-    "begin", "beset", "commit", "compel", "concur", "confer", "control",
-    "defer", "demur", "deter", "dispel", "emit", "enrol", "entrap", "equip",
-    "excel", "expel", "extol", "forbid", "forget", "format", "handicap",
-    "impel", "incur", "infer", "input", "inset", "inter", "kidnap", "occur",
-    "offset", "omit", "outbid", "outfit", "outrun", "outwit", "overlap",
-    "patrol", "permit", "prefer", "program", "propel", "rebel", "rebut",
-    "recap", "recur", "refer", "regret", "remit", "repel", "reset", "resit",
-    "retrofit", "submit", "transfer", "transmit", "unban", "unwrap", "upset",
+    "abet", "abhor", "acquit", "admit", "allot", "babysit", "befit", "beget", "begin", "beset",
+    "commit", "compel", "concur", "confer", "control", "defer", "demur", "deter", "dispel", "emit",
+    "enrol", "entrap", "equip", "excel", "expel", "extol", "forbid", "forget", "format",
+    "handicap", "impel", "incur", "infer", "input", "inset", "inter", "kidnap", "occur", "offset",
+    "omit", "outbid", "outfit", "outrun", "outwit", "overlap", "patrol", "permit", "prefer",
+    "program", "propel", "rebel", "rebut", "recap", "recur", "refer", "regret", "remit", "repel",
+    "reset", "resit", "retrofit", "submit", "transfer", "transmit", "unban", "unwrap", "upset",
 ];
 
 /// Defective modals with no participle/infinitive that don't fit the

@@ -219,7 +219,10 @@ impl Index {
         let rel = data[off..].iter().position(|&b| b == 0).unwrap_or(0);
         let fp = off + rel + 1;
         let w = self.field_bytes;
-        (read_be(&data[fp..fp + w]), read_be(&data[fp + w..fp + 2 * w]))
+        (
+            read_be(&data[fp..fp + w]),
+            read_be(&data[fp + w..fp + 2 * w]),
+        )
     }
 
     /// Merge the blocks of every record sharing a headword into a single

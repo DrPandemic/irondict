@@ -30,8 +30,10 @@ md_url = "https://github.com/DrPandemic/irondict"
 md_authors = ["@DrPandemic"]
 md_bin_dependencies = ["irondict"]
 
-# Parses one `irondict search` result line: "Headword  [dictionary]  (score 1.00)".
+# Parses one `irondict search` result line:
+# "Headword  [dictionary]  (score 1.00)\tsnippet".
 # The headword may contain spaces, so match up to the two-space + "[dict]" marker.
+# The snippet (separated by \t) is extracted separately in _search().
 RESULT_RE = re.compile(r"^(.+?)\s+\[([^\]]+)\]\s+\(score")
 
 # Parses one `irondict list` line:
@@ -96,11 +98,11 @@ class DictHandler(GeneratorQueryHandler):
             cmd += ["--dict", self._dict]
         return Action("open", "Open in IronDict", lambda c=cmd: runDetachedProcess(c))
 
-    def _item(self, headword, dictionary):
+    def _item(self, headword, dictionary, snippet):
         return StandardItem(
             id=headword,
             text=headword,
-            subtext=dictionary,
+            subtext=snippet,
             icon_factory=self._plugin.icon,
             actions=[
                 self._open_action(headword),
@@ -110,7 +112,7 @@ class DictHandler(GeneratorQueryHandler):
 
     def _search(self, query):
         mode = "fuzzy" if self._fuzzy else "prefix"
-        cmd = [self._plugin.executable, "search", query, "--mode", mode, "--limit", "25"]
+        cmd = [self._plugin.executable, "search", query, "--mode", mode, "--limit", "25", "--with-snippet"]
         if self._dict:
             cmd += ["--dict", self._dict]
         try:
@@ -123,7 +125,10 @@ class DictHandler(GeneratorQueryHandler):
         for line in proc.stdout.splitlines():
             m = RESULT_RE.match(line)
             if m:
-                items.append(self._item(m.group(1), m.group(2)))
+                snippet = ""
+                if "\t" in line:
+                    snippet = line.rsplit("\t", 1)[-1]
+                items.append(self._item(m.group(1), m.group(2), snippet))
         return items
 
     def items(self, ctx):
