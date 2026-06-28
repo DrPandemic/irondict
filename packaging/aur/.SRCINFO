@@ -8,6 +8,6 @@ pkgbase = irondict
 	makedepends = cargo
 	optdepends = albert: launcher integration ("d word" to search the dictionaries)
 	source = https://github.com/DrPandemic/irondict/archive/refs/tags/v0.8.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = a07160b5a367408270a00897bdd24543132b0bb71e5374c46bd02217ddfc5de3
 
 pkgname = irondict
