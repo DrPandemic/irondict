@@ -2508,7 +2508,7 @@ fn lookup_raw(
 /// One block parsed from an HTML dictionary entry: its hanging sense marker
 /// (derived from list nesting), its text (with `LINK_*`/`EMPH_*` sentinels still
 /// embedded), and flags for usage examples (`quote`) and section headings.
-struct HtmlBlock {
+pub(crate) struct HtmlBlock {
     marker: String,
     text: String,
     quote: bool,
@@ -2525,7 +2525,7 @@ struct HtmlBlock {
 // `flush!` clears `link_open` after the final flush, where the value is no longer
 // read — an expected dead store given the macro is reused mid-stream too.
 #[allow(unused_assignments)]
-fn html_to_blocks(html: &str) -> Vec<HtmlBlock> {
+pub(crate) fn html_to_blocks(html: &str) -> Vec<HtmlBlock> {
     let chars: Vec<char> = html.chars().collect();
     let mut out: Vec<HtmlBlock> = Vec::new();
     let mut cur = String::new();
@@ -2810,7 +2810,10 @@ fn to_roman(mut n: usize) -> String {
 /// trails it is the part of speech. A following etymology line (opening with the
 /// "étym." label) is lifted too. Returns `(pron, pos, etym)`; leaves a paragraph
 /// in place when it doesn't look like a header line.
-fn extract_html_header(paras: &mut Vec<HtmlBlock>, headword: &str) -> (String, String, String) {
+pub(crate) fn extract_html_header(
+    paras: &mut Vec<HtmlBlock>,
+    headword: &str,
+) -> (String, String, String) {
     // Wiktionary lists pronunciations as `IPA: /…/` items scattered through the
     // entry; lift them onto the grey pron line and drop them from the body.
     let mut prons: Vec<String> = Vec::new();
@@ -3111,7 +3114,7 @@ fn split_long(s: &str, max: usize) -> Vec<String> {
 // ---- GCIDE markup parsing (display only; proper rendering is Phase 7) ----
 
 /// A parsed GCIDE entry: pronunciation respelling, part of speech, and senses.
-struct Parsed {
+pub(crate) struct Parsed {
     pronunciation: String,
     pos: String,
     senses: Vec<Sense>,
@@ -3120,7 +3123,7 @@ struct Parsed {
 /// One numbered (or unnumbered) sense: its definition `body` plus any indented
 /// example/quotation lines GCIDE attaches to it, kept so the body pane can show
 /// them in a lighter italic style instead of dropping them.
-struct Sense {
+pub(crate) struct Sense {
     body: String,
     quotes: Vec<String>,
 }
@@ -3129,7 +3132,7 @@ struct Sense {
 /// (intransitive)") and the senses it governs. GCIDE leads a homograph with
 /// repeated `\Word\, n.` / `\Word\, v. i.` headers; each becomes a section so the
 /// POS heads its own senses in the body instead of a single chip at the top.
-struct PosSection {
+pub(crate) struct PosSection {
     pos: String,
     senses: Vec<Sense>,
 }
@@ -3138,7 +3141,7 @@ fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
     cell.get_or_init(|| Regex::new(pattern).unwrap())
 }
 
-fn parse_entry(raw: &str) -> Parsed {
+pub(crate) fn parse_entry(raw: &str) -> Parsed {
     // Keep braces ({...}) intact — they encode cross-references that are
     // later converted to clickable markdown links by convert_gcide_refs_to_links.
     let text = drop_markers(raw);
@@ -3254,7 +3257,7 @@ fn drop_markers(text: &str) -> String {
         .join("\n")
 }
 
-fn strip_braces(s: &str) -> String {
+pub(crate) fn strip_braces(s: &str) -> String {
     s.chars().filter(|&c| c != '{' && c != '}').collect()
 }
 
@@ -3347,7 +3350,7 @@ fn is_quote(line: &str) -> bool {
     lead >= 10 || line.trim_start().starts_with("--")
 }
 
-fn collapse_ws(s: &str) -> String {
+pub(crate) fn collapse_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -3473,13 +3476,17 @@ fn cleaned_plain(raw: &str) -> String {
 /// Generous because HTML entries can open with a few hundred characters of
 /// inline-CSS tags before any visible text; `make_snippet` strips the markup and
 /// then truncates to a display length.
-const SNIPPET_SCAN_LEN: usize = 800;
+pub(crate) const SNIPPET_SCAN_LEN: usize = 800;
 
 /// Fetch a result-list preview snippet for `headword` from the dictionary it was
 /// found in. The search index no longer stores definitions (see `SearchHit`), so
 /// the snippet is read on demand from the source dictionary and bounded before
 /// the (potentially HTML/GCIDE-heavy) `make_snippet` processing.
-fn fetch_snippet(manager: &mut DictionaryManager, dictionary: &str, headword: &str) -> String {
+pub(crate) fn fetch_snippet(
+    manager: &mut DictionaryManager,
+    dictionary: &str,
+    headword: &str,
+) -> String {
     let entries = manager.lookup_in(dictionary, headword).unwrap_or_default();
     let raw: String = entries
         .iter()
@@ -3498,7 +3505,7 @@ fn fetch_snippet(manager: &mut DictionaryManager, dictionary: &str, headword: &s
 /// body uses so the two agree: the headword line and its pronunciation are
 /// dropped, leaving the first sense/definition. `headword` lets the HTML path
 /// drop the matching headword line.
-fn make_snippet(raw: &str, headword: &str) -> String {
+pub(crate) fn make_snippet(raw: &str, headword: &str) -> String {
     let tail = if raw.contains('<') {
         // HTML entry: drop the headword/pronunciation line(s) like the card does,
         // then show the remaining definition text.
@@ -3532,7 +3539,7 @@ fn make_snippet(raw: &str, headword: &str) -> String {
 /// Decode GCIDE's ASCII diacritic codes (`[=a]`→ā, `["o]`→ö, `[ae]`→æ, …) into
 /// Unicode. Unknown codes (usage labels like `[Obs.]`, long brackets) are left
 /// as-is. Used on every displayed string so phonetics and accented words render.
-fn decode_gcide(s: &str) -> String {
+pub(crate) fn decode_gcide(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = re(&RE, r"\[([^\[\]]{1,5})\]");
     re.replace_all(s, |c: &regex::Captures| {
@@ -3786,7 +3793,7 @@ fn convert_html_refs_to_links(text: &str) -> String {
 
 /// Strip the cross-reference sentinels, keeping the link text — for plain-text
 /// uses (result snippets, the block's selectable text, header fields).
-fn strip_link_markers(text: &str) -> String {
+pub(crate) fn strip_link_markers(text: &str) -> String {
     render_links(text, false)
 }
 

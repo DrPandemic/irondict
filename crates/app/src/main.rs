@@ -345,21 +345,7 @@ fn run_search(
             hit.headword, hit.dictionary, hit.score
         );
         if with_snippet {
-            let snippet = manager
-                .lookup_in(&hit.dictionary, &hit.headword)
-                .ok()
-                .and_then(|entries| {
-                    entries.first().map(|e| {
-                        e.segments
-                            .first()
-                            .map(|s| s.text.as_str())
-                            .unwrap_or("")
-                            .chars()
-                            .take(100)
-                            .collect::<String>()
-                    })
-                })
-                .unwrap_or_default();
+            let snippet = gui::fetch_snippet(&mut manager, &hit.dictionary, &hit.headword);
             line.push('\t');
             line.push_str(&snippet);
         }
