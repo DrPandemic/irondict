@@ -105,7 +105,8 @@ git push origin "$TAG"
 
 URL="https://github.com/$SLUG/archive/refs/tags/$TAG.tar.gz"
 TARBALL=$(mktemp --suffix=.tar.gz)
-trap 'rm -f "$TARBALL" "${TARBALL}.asc"' EXIT
+ASC="v${NEW}.tar.gz.asc"
+trap 'rm -f "$TARBALL" "$ASC"' EXIT
 
 echo "Fetching release tarball..."
 for attempt in 1 2 3 4 5 6 7 8 9 10; do
@@ -121,10 +122,10 @@ SHA=$(sha256sum "$TARBALL" | cut -d' ' -f1)
 echo "sha256: $SHA"
 
 echo "Signing tarball with GPG..."
-gpg --detach-sign --armor --output "${TARBALL}.asc" "$TARBALL"
+gpg --detach-sign --armor --output "$ASC" "$TARBALL"
 
 echo "Creating GitHub release and uploading .asc signature..."
-gh release create "$TAG" --title "$TAG" --notes "" "${TARBALL}.asc"
+gh release create "$TAG" --title "$TAG" --notes "" "$ASC"
 
 sed -i "s/^sha256sums=.*/sha256sums=('$SHA' 'SKIP')/" "$PKGBUILD"
 ( cd packaging/aur && makepkg --printsrcinfo > .SRCINFO )
