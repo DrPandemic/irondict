@@ -122,7 +122,7 @@ SHA=$(sha256sum "$TARBALL" | cut -d' ' -f1)
 echo "sha256: $SHA"
 
 echo "Signing tarball with GPG..."
-gpg --detach-sign --armor --output "$ASC" "$TARBALL"
+gpg --detach-sign --armor --local-user "$SIGNKEY" --output "$ASC" "$TARBALL"
 
 echo "Creating GitHub release and uploading .asc signature..."
 gh release create "$TAG" --title "$TAG" --notes "" "$ASC"
