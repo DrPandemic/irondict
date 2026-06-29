@@ -7,18 +7,31 @@ arch=('x86_64')
 url="https://github.com/DrPandemic/irondict"
 license=('GPL-3.0-or-later')
 makedepends=('cargo')
+depends=('glibc' 'gcc-libs' 'fontconfig' 'freetype2' 'expat' 'zlib' 'bzip2' 'libpng' 'brotli')
 optdepends=('albert: launcher integration ("d word" to search the dictionaries)')
-source=("https://github.com/DrPandemic/irondict/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('63f45013eef0dd1622c3cb6196eeb69677911931d09a86351587bf2fae5f16af')
+source=("https://github.com/DrPandemic/irondict/archive/refs/tags/v${pkgver}.tar.gz"
+        "v${pkgver}.tar.gz.asc::https://github.com/DrPandemic/irondict/releases/download/v${pkgver}/v${pkgver}.tar.gz.asc")
+sha256sums=('63f45013eef0dd1622c3cb6196eeb69677911931d09a86351587bf2fae5f16af' 'SKIP')
+validpgpkeys=('E98D18E745656B40CDEE33BD9C53D2EE5DE74E65')
 
 prepare() {
   cd "$srcdir/$pkgname-$pkgver"
   export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
   cd "$srcdir/$pkgname-$pkgver"
-  cargo build --release -p irondict
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p irondict
+}
+
+check() {
+  cd "$srcdir/$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen --workspace
 }
 
 package() {

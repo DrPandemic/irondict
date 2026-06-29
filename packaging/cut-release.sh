@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Cut a new irondict release: bump the version, tag it, and finalize the AUR
-# packaging (PKGBUILD checksum + .SRCINFO).
+# Cut a new irondict release: bump the version, sign a GPG tag, and finalize the
+# AUR packaging (PKGBUILD checksum + .SRCINFO). Uploads a detached PGP signature
+# of the tarball as a GitHub release asset so makepkg can verify it.
 #
 # Interactive — proposes a minor bump and asks to confirm before touching
 # anything. Run it from anywhere inside the repo:
@@ -20,9 +21,13 @@ die() { echo "error: $*" >&2; exit 1; }
 
 # --- preflight ---------------------------------------------------------------
 
-for tool in git cargo curl sha256sum makepkg; do
+for tool in git cargo curl sha256sum makepkg gpg gh; do
     command -v "$tool" >/dev/null || die "missing required tool: $tool"
 done
+
+# Require a GPG signing key to be configured.
+SIGNKEY=$(git config user.signingkey) || die "git config user.signingkey is not set"
+[[ -n $SIGNKEY ]] || die "git config user.signingkey is empty"
 
 ROOT=$(git rev-parse --show-toplevel) || die "not inside a git repository"
 cd "$ROOT"
@@ -64,9 +69,9 @@ git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && die "tag $TAG already e
 
 echo
 echo "About to cut $CUR -> $NEW:"
-echo "  • bump $CARGO_TOML + Cargo.lock + $PKGBUILD"
-echo "  • commit and push to $BRANCH, tag $TAG, push the tag"
-echo "  • fetch the $TAG tarball, set its sha256, regenerate .SRCINFO, commit, push"
+  echo "  • bump $CARGO_TOML + Cargo.lock + $PKGBUILD"
+  echo "  • sign and push signed GPG tag $TAG"
+  echo "  • fetch the $TAG tarball, set its sha256, .asc sign, upload to GitHub release"
 read -rp "Proceed? [y/N] " ans
 [[ ${ans:-} == [yY] ]] || die "aborted"
 
@@ -84,7 +89,7 @@ cargo update --workspace --quiet
 
 # PKGBUILD: new pkgver, and a placeholder checksum until the tarball exists.
 sed -i "s/^pkgver=.*/pkgver=$NEW/" "$PKGBUILD"
-sed -i "s/^sha256sums=.*/sha256sums=('SKIP')/" "$PKGBUILD"
+sed -i "s/^sha256sums=.*/sha256sums=('SKIP' 'SKIP')/" "$PKGBUILD"
 ( cd packaging/aur && makepkg --printsrcinfo > .SRCINFO )
 
 git add "$CARGO_TOML" Cargo.lock "$PKGBUILD" "$SRCINFO"
@@ -93,14 +98,14 @@ git push origin "$BRANCH"
 
 # --- tag ---------------------------------------------------------------------
 
-git tag -a "$TAG" -m "$TAG"
+git tag -s "$TAG" -m "$TAG"
 git push origin "$TAG"
 
 # --- checksum + .SRCINFO (commit 2) ------------------------------------------
 
 URL="https://github.com/$SLUG/archive/refs/tags/$TAG.tar.gz"
 TARBALL=$(mktemp --suffix=.tar.gz)
-trap 'rm -f "$TARBALL"' EXIT
+trap 'rm -f "$TARBALL" "${TARBALL}.asc"' EXIT
 
 echo "Fetching release tarball..."
 for attempt in 1 2 3 4 5 6 7 8 9 10; do
@@ -115,7 +120,13 @@ done
 SHA=$(sha256sum "$TARBALL" | cut -d' ' -f1)
 echo "sha256: $SHA"
 
-sed -i "s/^sha256sums=.*/sha256sums=('$SHA')/" "$PKGBUILD"
+echo "Signing tarball with GPG..."
+gpg --detach-sign --armor --output "${TARBALL}.asc" "$TARBALL"
+
+echo "Creating GitHub release and uploading .asc signature..."
+gh release create "$TAG" --title "$TAG" --notes "" "${TARBALL}.asc"
+
+sed -i "s/^sha256sums=.*/sha256sums=('$SHA' 'SKIP')/" "$PKGBUILD"
 ( cd packaging/aur && makepkg --printsrcinfo > .SRCINFO )
 
 git add "$PKGBUILD" "$SRCINFO"
@@ -123,5 +134,5 @@ git commit -qm "Set $TAG release checksum and regenerate .SRCINFO"
 git push origin "$BRANCH"
 
 echo
-echo "Released $TAG."
+echo "Released $TAG (signed)."
 echo "Build locally with: (cd packaging/aur && makepkg -si)"

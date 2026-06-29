@@ -8,6 +8,8 @@ Files for building IronDict as an Arch package and publishing it to the
   binary plus the desktop entry, icons, and bundled GCIDE dictionary.
 - `.SRCINFO` — generated metadata the AUR reads. Must be kept in sync with the
   `PKGBUILD` (see below).
+- `LICENSE` — 0BSD license for the packaging sources (required by AUR).
+- `REUSE.toml` — REUSE compliance file for the packaging sources (required by AUR).
 
 ## Build
 
@@ -15,20 +17,20 @@ Run as a normal user (not root) with `base-devel` and `cargo`/`rust` installed:
 
 ```sh
 cd packaging/aur
-makepkg -f          # build; produces irondict-<ver>-1-x86_64.pkg.tar.zst
-sudo pacman -U irondict-*-x86_64.pkg.tar.zst
+makepkg -f          # build (skips check); produces irondict-<ver>-1-x86_64.pkg.tar.zst
+makepkg -f -i       # build and install
 ```
 
-Or build and install in one step:
+Or build, test, and install in one step:
 
 ```sh
-makepkg -si         # -s also pulls missing deps, then installs
+makepkg -si         # -s pulls missing deps, runs check(), then installs
 ```
 
 Useful flags:
 
-- `-c` — remove the `src/`/`pkg/` work dirs afterward (they're gitignored).
-- `--skipchecks` — skip the `check()` step (`cargo test --workspace`).
+- `-c` — remove the `src/`/`pkg/` work dirs afterward.
+- `--nocheck` — skip the `check()` step (`cargo test --workspace`).
 - `makepkg --verifysource` — only download + checksum-verify the source.
 
 The build fetches the **released tag** named by `pkgver`, not the local working
@@ -52,4 +54,5 @@ After tagging a release (e.g. `vX.Y.Z`):
    makepkg --printsrcinfo > .SRCINFO
    ```
 
-4. Verify it builds cleanly, then commit both files.
+4. Verify it builds cleanly, then commit all changed files (`PKGBUILD`,
+   `.SRCINFO`, and `REUSE.toml` if version changed).

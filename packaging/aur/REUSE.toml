@@ -1,0 +1,10 @@
+version = 1
+SPDX-PackageName = "irondict"
+SPDX-PackageSupplier = "DrPandemic <DrPandemic@users.noreply.github.com>"
+SPDX-PackageDownloadLocation = "https://aur.archlinux.org/irondict.git"
+
+[[annotations]]
+path = ["PKGBUILD", ".SRCINFO", "README.md"]
+precedence = "override"
+SPDX-FileCopyrightText = "DrPandemic"
+SPDX-License-Identifier = "0BSD"
