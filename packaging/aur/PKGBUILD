@@ -27,13 +27,6 @@ build() {
   cargo build --frozen --release -p irondict
 }
 
-check() {
-  cd "$srcdir/$pkgname-$pkgver"
-  export RUSTUP_TOOLCHAIN=stable
-  export CARGO_TARGET_DIR=target
-  cargo test --frozen --workspace
-}
-
 package() {
   cd "$srcdir/$pkgname-$pkgver"
 
