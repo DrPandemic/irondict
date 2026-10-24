@@ -121,6 +121,50 @@ cp -r packaging/albert/irondict ~/.local/share/albert/python/plugins/
 Then enable **Python → IronDict** in Albert's settings. See
 [`packaging/albert/README.md`](packaging/albert/README.md) for details.
 
+## Android
+
+The GUI also builds as an Android APK. Toolchain setup (Rust Android targets, `cargo-apk`, JDK, SDK/NDK) is in [`docs/packaging.md`](docs/packaging.md#android-arm64-apk).
+
+### Emulator
+
+Create a Pixel 7 AVD and boot it. On a headless build host, run it without a window and with software rendering:
+
+```sh
+avdmanager create avd -n Pixel_7 -k 'system-images;android-37.2;google_apis_playstore_ps16k;x86_64' -d pixel_7
+emulator -avd Pixel_7 -no-window -no-audio -gpu swiftshader_indirect &
+adb wait-for-device
+```
+
+### Build and install
+
+```sh
+CARGO_APK_RELEASE_KEYSTORE=~/.android/debug.keystore \
+CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android \
+cargo apk build -p irondict-android --lib --release --target x86_64-linux-android
+adb install -r target/release/apk/irondict-android.apk
+adb shell am start -n org.imateapot.irondict/android.app.NativeActivity
+adb logcat -s irondict
+```
+
+If `~/.android/debug.keystore` doesn't exist yet, create it with `keytool -genkeypair -keystore ~/.android/debug.keystore -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"`.
+
+### Viewing a remote headless emulator
+
+[scrcpy](https://github.com/Genymobile/scrcpy) mirrors the emulator to your desktop over SSH. On the desktop, stop the local adb server and tunnel to the build host's:
+
+```sh
+adb kill-server
+ssh -CN -L5037:localhost:5037 -L27183:localhost:27183 user@build-host
+```
+
+Then, in another terminal:
+
+```sh
+scrcpy --force-adb-forward
+```
+
+Mouse and keyboard input go to the emulator. While the tunnel is up, local `adb` commands (`install`, `logcat`, …) also target the remote emulator. Expect it to feel slow: a headless host renders the emulator in software. When done, stop the tunnel and run `adb kill-server` again before using a local emulator or phone.
+
 ## Configuration
 
 Dictionaries and preferences are stored in `~/.config/irondict/config.toml`, and
