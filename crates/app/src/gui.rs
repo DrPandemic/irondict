@@ -521,6 +521,13 @@ pub fn run(
     autotype: Option<String>,
 ) -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
+    // Local file import needs a native picker and a real path; the Android build
+    // ships GCIDE in the APK and everything else via the catalog.
+    ui.set_can_add_local(cfg!(not(target_os = "android")));
+    // Don't raise the soft keyboard at launch on Android; the desktop build
+    // focuses the search field explicitly.
+    #[cfg(not(target_os = "android"))]
+    ui.invoke_focus_search();
     // The accent (indigo) and light default live in the .slint; the OS values are
     // detected and applied below, off the startup path.
 
@@ -800,7 +807,7 @@ pub fn run(
                     let scope = scope_filter(ui.get_scope(), &manager);
                     let _ = req_tx.send(WorkerReq::Search {
                         gen: gen.get(),
-                        query: ui.get_query().to_string(),
+                        query: q.to_string(),
                         scope,
                     });
                 },
@@ -932,6 +939,8 @@ pub fn run(
         let gen = gen.clone();
         ui.on_navigate_back(move || {
             let ui = ui_weak.unwrap();
+            // A history jump shows a definition, so reveal the pane in narrow mode.
+            ui.set_narrow_def(true);
             let entry = {
                 let mut h = history.borrow_mut();
                 if !h.can_back() {
@@ -956,6 +965,7 @@ pub fn run(
         let gen = gen.clone();
         ui.on_navigate_forward(move || {
             let ui = ui_weak.unwrap();
+            ui.set_narrow_def(true);
             let entry = {
                 let mut h = history.borrow_mut();
                 if !h.can_forward() {
@@ -1050,8 +1060,10 @@ pub fn run(
 
     // ---- settings: add a dictionary via the native (portal) file picker ----
     // The dialog runs on a worker thread; the chosen path comes back over a
-    // channel and is processed on the UI thread by `add_timer`.
+    // channel and is processed on the UI thread by `add_timer`. Desktop only.
+    #[cfg(not(target_os = "android"))]
     let (path_tx, path_rx) = mpsc::channel::<PathBuf>();
+    #[cfg(not(target_os = "android"))]
     {
         ui.on_add_dict(move || {
             let path_tx = path_tx.clone();
@@ -1066,7 +1078,9 @@ pub fn run(
             });
         });
     }
+    #[cfg(not(target_os = "android"))]
     let add_timer = Timer::default();
+    #[cfg(not(target_os = "android"))]
     {
         let ui_weak = ui.as_weak();
         let manager = manager.clone();
@@ -1267,6 +1281,7 @@ pub fn run(
     let r = ui.run();
     // Stop the timers and ask the worker to exit so the process winds down cleanly.
     drop(resp_timer);
+    #[cfg(not(target_os = "android"))]
     drop(add_timer);
     drop(dl_timer);
     drop(autotype_timer);
@@ -1643,6 +1658,10 @@ fn apply_appearance(ui: &AppWindow, manager: &Rc<RefCell<DictionaryManager>>) {
         ThemeMode::Dark => Some(true),
     };
     let forced_accent = prefs.accent.as_deref().and_then(theme::parse_hex);
+    // Android gets the platform color scheme through Slint's `Palette`; follow
+    // it whenever the user left the theme on System.
+    #[cfg(target_os = "android")]
+    ui.set_follow_system(matches!(prefs.theme_mode, ThemeMode::System));
     theme::apply_os_theme(ui.as_weak(), forced_dark, forced_accent);
 }
 
@@ -3482,7 +3501,7 @@ pub(crate) const SNIPPET_SCAN_LEN: usize = 800;
 /// found in. The search index no longer stores definitions (see `SearchHit`), so
 /// the snippet is read on demand from the source dictionary and bounded before
 /// the (potentially HTML/GCIDE-heavy) `make_snippet` processing.
-pub(crate) fn fetch_snippet(
+pub fn fetch_snippet(
     manager: &mut DictionaryManager,
     dictionary: &str,
     headword: &str,

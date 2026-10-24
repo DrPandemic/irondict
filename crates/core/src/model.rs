@@ -1,10 +1,10 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use stardict::dict::Dict;
 use stardict::Ifo;
 
+use crate::dict::DictReader;
 use crate::idx::Index;
+use crate::source::Bytes;
 
 #[derive(Debug, Clone)]
 pub struct DefinitionSegment {
@@ -25,27 +25,27 @@ pub struct DictionaryInfo {
 }
 
 /// The immutable, expensive-to-parse part of a loaded dictionary: the headword
-/// index (with its synonym map) and the `.ifo` metadata. Parsing these from the
-/// `.idx`/`.syn` files is by far the dominant cost of opening a dictionary
-/// (multiple seconds across a large set), so it is done once and shared (behind
-/// an `Arc`) by every handle to the dictionary — letting the UI thread and the
-/// search worker each hold a dictionary without reparsing. `dict_path`/`dict_bz`
-/// record where the (cheap) `.dict` reader comes from so another handle can open
-/// its own.
+/// index (with its synonym map) and the `.ifo` metadata, plus the shared `.dict`
+/// mapping. Parsing these from the `.idx`/`.syn` files is by far the dominant
+/// cost of opening a dictionary (multiple seconds across a large set), so it is
+/// done once and shared (behind an `Arc`) by every handle to the dictionary —
+/// letting the UI thread and the search worker each hold a dictionary without
+/// reparsing. The `.dict` bytes are shared too, so a second handle reuses the
+/// mapping rather than reopening the file.
 pub(crate) struct SharedDict {
     pub(crate) ifo: Ifo,
     pub(crate) idx: Index,
-    pub(crate) dict_path: PathBuf,
-    pub(crate) dict_bz: bool,
+    pub(crate) dict_data: Arc<Bytes>,
+    pub(crate) dict_gz: bool,
 }
 
 pub struct Dictionary {
     pub info: DictionaryInfo,
     pub(crate) shared: Arc<SharedDict>,
-    /// The `.dict` reader for this handle. It seeks on every lookup, so it needs
-    /// `&mut`; each handle therefore owns its own (the parsed index above is the
-    /// part that is shared and read-only).
-    pub(crate) dict: Dict,
+    /// The `.dict` reader for this handle. It tracks a per-handle chunk cache,
+    /// so it needs `&mut`; each handle therefore owns its own (the mapping above
+    /// and the parsed index are the parts that are shared and read-only).
+    pub(crate) dict: DictReader,
 }
 
 impl Dictionary {
@@ -55,8 +55,7 @@ impl Dictionary {
     /// `.idx`/`.syn` parse — so handing the search worker its own copy at launch
     /// no longer reparses every dictionary.
     pub fn reopen(&self) -> Result<Dictionary, crate::Error> {
-        let dict = Dict::new(self.shared.dict_path.clone(), self.shared.dict_bz)
-            .map_err(|e| crate::Error::Stardict(e.into()))?;
+        let dict = DictReader::new_shared(Arc::clone(&self.shared.dict_data), self.shared.dict_gz)?;
         Ok(Dictionary {
             info: self.info.clone(),
             shared: Arc::clone(&self.shared),

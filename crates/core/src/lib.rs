@@ -1,12 +1,17 @@
+pub mod bundled;
 pub mod config;
 pub mod conjugation;
+mod dict;
 pub mod download;
+pub mod ifo_bytes;
 mod idx;
 pub mod manager;
 pub mod model;
 pub mod search;
+pub mod source;
 pub mod stardict;
 
+pub use bundled::{register as register_bundled, BundledFiles};
 pub use config::{Config, DictionaryConfig, Language, Preferences, ThemeMode};
 pub use conjugation::{
     ConjForm, ConjSection, Conjugation, Conjugator, ConjugatorRegistry, EnglishConjugator,
@@ -18,6 +23,7 @@ pub use manager::{
     ManagedDictionary,
 };
 pub use search::{IndexProgress, SearchEngine, SearchHit, SearchMode};
+pub use source::DictSource;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

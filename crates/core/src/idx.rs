@@ -33,17 +33,15 @@
 
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::fs::File;
 use std::io::Read;
-use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use flate2::read::GzDecoder;
-use memmap2::Mmap;
 use rayon::prelude::*;
 use stardict::idx::{IdxEntry, IdxEntryBlock};
 use stardict::ifo::{Ifo, Version};
 
+use crate::source::{Bytes, DictSource};
 use crate::Error;
 
 /// Decode a StarDict string field, borrowing the mapped bytes when they are
@@ -64,7 +62,7 @@ fn decode_cow(buf: &[u8]) -> Cow<'_, str> {
 }
 
 /// [`decode_cow`] as an owned `String`, used where a borrow can't be held.
-fn decode(buf: &[u8]) -> String {
+pub(crate) fn decode(buf: &[u8]) -> String {
     decode_cow(buf).into_owned()
 }
 
@@ -89,37 +87,16 @@ fn read_be(buf: &[u8]) -> usize {
 /// from.
 const CACHE_MIN_WORDS: usize = 10_000;
 
-/// The `.idx` bytes the [`Index`] reads from: memory-mapped for a plain `.idx`,
-/// or owned for a gzipped one (which has to be decompressed into memory). The
-/// record-offset table indexes into whichever this is.
-enum IdxData {
-    Mapped(Mmap),
-    Owned(Vec<u8>),
-}
-
-impl IdxData {
-    fn as_bytes(&self) -> &[u8] {
-        match self {
-            IdxData::Mapped(m) => &m[..],
-            IdxData::Owned(v) => v,
-        }
-    }
-
-    /// Map a plain `.idx`, or read + decompress a gzipped one.
-    fn open(idx_path: &Path, idx_gz: bool) -> Result<IdxData, Error> {
-        if idx_gz {
-            let bytes = std::fs::read(idx_path)?;
-            let mut out = Vec::new();
-            GzDecoder::new(bytes.as_slice()).read_to_end(&mut out)?;
-            Ok(IdxData::Owned(out))
-        } else {
-            let file = File::open(idx_path)?;
-            // SAFETY: the `.idx` is a read-only data file we never write to; a
-            // concurrent external truncation could fault, but that is true of
-            // every dictionary file the app maps and is outside the threat model.
-            let mmap = unsafe { Mmap::map(&file)? };
-            Ok(IdxData::Mapped(mmap))
-        }
+/// Resolve the `.idx` bytes: map a plain `.idx` in place, or read and
+/// decompress a gzipped one into memory.
+fn open_idx(source: &DictSource, idx_gz: bool) -> Result<Bytes, Error> {
+    if idx_gz {
+        let bytes = source.read_all()?;
+        let mut out = Vec::new();
+        GzDecoder::new(bytes.as_slice()).read_to_end(&mut out)?;
+        Ok(Bytes::Owned(Arc::from(out)))
+    } else {
+        source.open()
     }
 }
 
@@ -137,7 +114,7 @@ fn read_word(data: &[u8], off: usize) -> Cow<'_, str> {
 /// optional lazily-searched `.syn`. None of the headwords are copied into owned
 /// strings at boot; they are read from [`data`](Self::data) on demand.
 pub struct Index {
-    data: IdxData,
+    data: Bytes,
     /// Width of the `.idx` offset/size fields (4 or 8), from the `.ifo`.
     field_bytes: usize,
     /// Byte offset of every record's start in `data`, in file order (including
@@ -153,44 +130,41 @@ pub struct Index {
 }
 
 impl Index {
-    /// Open `idx_path` (gz-decompressing when `idx_gz`) and remember `syn` for
-    /// lazy resolution. The derived tables are loaded from the sidecar cache when
-    /// it is present and valid, otherwise built by one scan of the `.idx` and
-    /// written back. Only the `.idx` is touched here; the `.syn` is mapped but
-    /// not scanned until the first synonym lookup.
-    pub fn new(
-        idx_path: &Path,
+    /// Open a dictionary's `.idx` from an arbitrary byte source. `syn` is the
+    /// optional `.syn` source.
+    pub fn from_source(
+        idx_source: &DictSource,
         ifo: &Ifo,
         idx_gz: bool,
-        syn: Option<&Path>,
+        syn: Option<&DictSource>,
     ) -> Result<Index, Error> {
-        let data = IdxData::open(idx_path, idx_gz)?;
+        let data = open_idx(idx_source, idx_gz)?;
         let w = idx_field_bytes(ifo);
 
-        // Validate/load the cache against the source file's length and mtime
-        // (not the decompressed bytes), so a gzipped `.idx` is keyed correctly.
-        let (src_len, src_mtime) = match std::fs::metadata(idx_path) {
-            Ok(m) => (m.len(), m.modified().ok()),
-            Err(_) => (0, None),
-        };
+        // Validate/load the cache against the source's identity (length + mtime,
+        // not the decompressed bytes), so a gzipped `.idx` is keyed correctly and
+        // an APK range keys on the APK file. In-memory sources skip the cache.
+        let cache_key = idx_source.cache_key();
 
         // Only large dictionaries go through the cache; small ones are cheap to
         // scan and aren't worth a cache file (see [`CACHE_MIN_WORDS`]).
         let (rec_offsets, order) = if ifo.wordcount >= CACHE_MIN_WORDS {
-            match cache::load(idx_path, src_len, src_mtime) {
+            match cache_key.as_ref().and_then(cache::load) {
                 Some(tables) => tables,
                 None => {
-                    let tables = build(data.as_bytes(), w);
-                    cache::store(idx_path, src_len, src_mtime, &tables.0, &tables.1);
+                    let tables = build(data.as_slice(), w);
+                    if let Some(key) = cache_key.as_ref() {
+                        cache::store(key, &tables.0, &tables.1);
+                    }
                     tables
                 }
             }
         } else {
-            build(data.as_bytes(), w)
+            build(data.as_slice(), w)
         };
 
         let syn = match syn {
-            Some(path) => Some(Syn::open(path)?),
+            Some(source) => Some(Syn::open(source)?),
             None => None,
         };
         Ok(Index {
@@ -209,12 +183,12 @@ impl Index {
 
     /// Record `i`'s original-case headword, read from the mapped `.idx`.
     fn word(&self, i: usize) -> Cow<'_, str> {
-        read_word(self.data.as_bytes(), self.rec_offsets[i] as usize)
+        read_word(self.data.as_slice(), self.rec_offsets[i] as usize)
     }
 
     /// Record `i`'s `.dict` block `(offset, size)`, read from the mapped `.idx`.
     fn fields(&self, i: usize) -> (usize, usize) {
-        let data = self.data.as_bytes();
+        let data = self.data.as_slice();
         let off = self.rec_offsets[i] as usize;
         let rel = data[off..].iter().position(|&b| b == 0).unwrap_or(0);
         let fp = off + rel + 1;
@@ -401,20 +375,13 @@ impl std::fmt::Debug for Index {
 mod cache {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::source::CacheKey;
 
     const MAGIC: &[u8; 4] = b"IDXC";
     const VERSION: u32 = 1;
-
-    /// The `.idx` absolute path as a string, used both to name the cache file
-    /// and, stored in the header, to guard against hash collisions.
-    fn abs_path(idx_path: &Path) -> String {
-        std::fs::canonicalize(idx_path)
-            .unwrap_or_else(|_| idx_path.to_path_buf())
-            .to_string_lossy()
-            .into_owned()
-    }
 
     fn cache_path(abs: &str) -> Option<PathBuf> {
         let dirs = directories::ProjectDirs::from("", "", "irondict")?;
@@ -449,25 +416,18 @@ mod cache {
             .collect()
     }
 
-    /// Load and validate the cache for `idx_path`. Returns the
-    /// `(rec_offsets, order)` tables, or `None` on any miss/mismatch/error.
-    pub fn load(
-        idx_path: &Path,
-        src_len: u64,
-        src_mtime: Option<SystemTime>,
-    ) -> Option<(Vec<u32>, Vec<u32>)> {
-        let abs = abs_path(idx_path);
-        let path = cache_path(&abs)?;
+    /// Load and validate the cache for `key`. Returns the `(rec_offsets, order)`
+    /// tables, or `None` on any miss/mismatch/error.
+    pub fn load(key: &CacheKey) -> Option<(Vec<u32>, Vec<u32>)> {
+        let path = cache_path(&key.name)?;
         let buf = std::fs::read(&path).ok()?;
-        parse(&buf, &abs, src_len, src_mtime)
+        parse(&buf, key)
     }
 
-    fn parse(
-        buf: &[u8],
-        abs: &str,
-        src_len: u64,
-        src_mtime: Option<SystemTime>,
-    ) -> Option<(Vec<u32>, Vec<u32>)> {
+    fn parse(buf: &[u8], key: &CacheKey) -> Option<(Vec<u32>, Vec<u32>)> {
+        let abs = key.name.as_str();
+        let src_len = key.len;
+        let src_mtime = key.mtime;
         if buf.get(0..4)? != MAGIC || rd_u32(buf, 4)? != VERSION {
             return None;
         }
@@ -501,17 +461,11 @@ mod cache {
         Some((rec_offsets, order))
     }
 
-    /// Write the cache for `idx_path`. Best-effort: any error is ignored, so the
-    /// next launch simply rebuilds the tables.
-    pub fn store(
-        idx_path: &Path,
-        src_len: u64,
-        src_mtime: Option<SystemTime>,
-        rec_offsets: &[u32],
-        order: &[u32],
-    ) {
-        let abs = abs_path(idx_path);
-        let Some(path) = cache_path(&abs) else {
+    /// Write the cache for `key`. Best-effort: any error is ignored, so the next
+    /// launch simply rebuilds the tables.
+    pub fn store(key: &CacheKey, rec_offsets: &[u32], order: &[u32]) {
+        let abs = key.name.as_str();
+        let Some(path) = cache_path(abs) else {
             return;
         };
 
@@ -519,8 +473,8 @@ mod cache {
             Vec::with_capacity(28 + abs.len() + 16 + rec_offsets.len() * 4 + order.len() * 4);
         buf.extend_from_slice(MAGIC);
         buf.extend_from_slice(&VERSION.to_le_bytes());
-        buf.extend_from_slice(&src_len.to_le_bytes());
-        buf.extend_from_slice(&mtime_nanos(src_mtime).to_le_bytes());
+        buf.extend_from_slice(&key.len.to_le_bytes());
+        buf.extend_from_slice(&mtime_nanos(key.mtime).to_le_bytes());
         buf.extend_from_slice(&(abs.len() as u32).to_le_bytes());
         buf.extend_from_slice(abs.as_bytes());
         buf.extend_from_slice(&(rec_offsets.len() as u64).to_le_bytes());
@@ -558,19 +512,14 @@ mod cache {
 /// lazily on the first synonym lookup, so opening the dictionary does no `.syn`
 /// work at all.
 struct Syn {
-    mmap: Mmap,
+    data: Bytes,
     offsets: OnceLock<Vec<usize>>,
 }
 
 impl Syn {
-    fn open(path: &Path) -> Result<Syn, Error> {
-        let file = File::open(path)?;
-        // SAFETY: the `.syn` file is a read-only data file we never write to; a
-        // concurrent external truncation could fault, but that is true of every
-        // dictionary file the app maps/reads and is outside the threat model.
-        let mmap = unsafe { Mmap::map(&file)? };
+    fn open(source: &DictSource) -> Result<Syn, Error> {
         Ok(Syn {
-            mmap,
+            data: source.open()?,
             offsets: OnceLock::new(),
         })
     }
@@ -578,7 +527,7 @@ impl Syn {
     /// Byte offsets of each record's start, built lazily on first use.
     fn offsets(&self) -> &[usize] {
         self.offsets.get_or_init(|| {
-            let data = &self.mmap[..];
+            let data = self.data.as_slice();
             let n = data.len();
             let mut offs = Vec::new();
             let mut i = 0usize;
@@ -596,7 +545,7 @@ impl Syn {
 
     /// The lowercased word of record `k`, the key the file is sorted on.
     fn key_at(&self, k: usize) -> String {
-        let data = &self.mmap[..];
+        let data = self.data.as_slice();
         let start = self.offsets()[k];
         let rel = data[start..]
             .iter()
@@ -607,7 +556,7 @@ impl Syn {
 
     /// The `.idx` index stored in record `k` (the 4 bytes after its `\0`).
     fn value_at(&self, k: usize) -> u32 {
-        let data = &self.mmap[..];
+        let data = self.data.as_slice();
         let start = self.offsets()[k];
         let rel = data[start..].iter().position(|&b| b == 0).unwrap_or(0);
         let p = start + rel + 1;

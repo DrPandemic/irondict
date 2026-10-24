@@ -12,14 +12,18 @@ directories = "5"
 regex = "1.12.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 slint = "1"
-zbus = "5.16.0"
 # Slint's text layout pulls in ICU4X. In debug builds, icu_provider logs data
 # errors (e.g. "No segmentation model for language: ja") via a raw eprintln!
 # unless its `logging` feature is on. Enabling it routes those through the `log`
 # crate instead, where they're dropped since we install no logger.
 icu_provider = { version = "2", features = ["logging"] }
+
+# Desktop-only integration: a native (portal) file picker and XDG-portal theme
+# detection. Neither exists on Android, so they are kept off that target.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
+zbus = "5.16.0"
 
 [build-dependencies]
 slint-build = "1"

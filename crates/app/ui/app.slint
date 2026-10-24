@@ -1,4 +1,4 @@
-import { ListView, ScrollView, Button, Switch, ComboBox } from "std-widgets.slint";
+import { ListView, ScrollView, Button, Switch, ComboBox, Palette } from "std-widgets.slint";
 
 // Bundled IBM Plex Sans (SIL OFL). A bare file import registers the font at
 // compile time so "IBM Plex Sans" is available as a font-family.
@@ -74,10 +74,376 @@ struct ConjMood {
 
 // Read-only text that the user can still select and copy (plain Text can't be
 // selected in Slint).
+// A SwipeGestureHandler that hosts content as children. With a plain
+// `TouchArea {}` behind the content, unpressed moves are accepted, so a nested
+// vertical ScrollView still receives the delayed press and can scroll while
+// horizontal swipes are handled here.
+component SwipePanel inherits SwipeGestureHandler {
+    @children
+}
+
+// One settings panel (0 Dictionaries, 1 Downloads, 2 Appearance). Used once on
+// desktop and as the three pages of the narrow swipe carousel.
+component SettingsPanelBody inherits Rectangle {
+    in property <int> index: 0;
+    in property <bool> narrow: false;
+    in property <[DictRow]> dict-items;
+    in property <bool> can-add-local: true;
+    in property <[CatalogRow]> catalog-items;
+    in property <int> theme-mode: 0;
+    in property <int> accent-choice: 0;
+    in property <[color]> accent-swatches;
+    in property <color> accent;
+    in property <color> accent-tint;
+    in property <color> bg;
+    in property <color> control-bg;
+    in property <color> text-primary;
+    in property <color> text-secondary;
+    in property <color> divider;
+    callback set-dict-language(int, int);
+    callback toggle-dict(int);
+    callback remove-dict(int);
+    callback add-dict();
+    callback delete-dict(int);
+    callback download-dict(int);
+    callback set-theme-mode(int);
+    callback set-accent(int);
+
+                    if index == 0 : VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 12px;
+                        ScrollView {
+                            vertical-stretch: 1;
+                            // never pan sideways: material's ComboBox is wide
+                            // and its preferred width can add a few px.
+                            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                            VerticalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                for d[i] in dict-items: Rectangle {
+                                    height: 58px;
+                                    border-radius: 8px;
+                                    background: control-bg;
+                                    border-width: 1px;
+                                    border-color: divider;
+                                    HorizontalLayout {
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+                                        spacing: 10px;
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            alignment: center;
+                                            spacing: 2px;
+                                            Text {
+                                                text: d.name;
+                                                font-size: 14px;
+                                                font-weight: 500;
+                                                color: text-primary;
+                                                overflow: elide;
+                                            }
+                                            Text {
+                                                text: d.words + " words";
+                                                font-size: 12px;
+                                                color: text-secondary;
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            ComboBox {
+                                                // material's ComboBox has wider
+                                                // padding + an arrow, so the phone
+                                                // width must be bigger to fit
+                                                // "English" without eliding.
+                                                // material's ComboBox defaults to a
+                                                // 160px min-width and stretch, which
+                                                // overflows the settings row (and
+                                                // shows a horizontal scrollbar). Pin
+                                                // both min and preferred width, and
+                                                // stop it from stretching.
+                                                min-width: narrow ? 132px : 116px;
+                                                preferred-width: narrow ? 132px : 116px;
+                                                horizontal-stretch: 0;
+                                                model: ["Auto", "English", "French", "Italian"];
+                                                current-index: d.language;
+                                                selected => { set-dict-language(i, self.current-index); }
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Switch {
+                                                checked: d.enabled;
+                                                toggled => { toggle-dict(i); }
+                                            }
+                                        }
+                                        Rectangle {
+                                            width: narrow ? 44px : 28px;
+                                            background: remove-touch.has-hover ? divider : transparent;
+                                            border-radius: 6px;
+                                            remove-touch := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { remove-dict(i); }
+                                            }
+                                            Text {
+                                                text: "×";
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                                font-size: 18px;
+                                                color: text-secondary;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if can-add-local : HorizontalLayout {
+                            alignment: start;
+                            Button {
+                                text: "Add dictionary…";
+                                clicked => { add-dict(); }
+                            }
+                        }
+                    }
+
+                    // ---- Downloads panel ----
+                    if index == 1 : VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 12px;
+                        ScrollView {
+                            vertical-stretch: 1;
+                            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                            VerticalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                for c[i] in catalog-items: Rectangle {
+                                    height: 50px;
+                                    border-radius: 8px;
+                                    background: control-bg;
+                                    border-width: 1px;
+                                    border-color: divider;
+                                    HorizontalLayout {
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+                                        spacing: 10px;
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            alignment: center;
+                                            spacing: 2px;
+                                            Text {
+                                                text: c.label;
+                                                font-size: 14px;
+                                                font-weight: 500;
+                                                color: text-primary;
+                                                overflow: elide;
+                                            }
+                                            Text {
+                                                text: c.status == 1
+                                                    ? "Downloading… " + Math.round(c.progress * 100) + "%"
+                                                    : c.detail;
+                                                font-size: 12px;
+                                                color: text-secondary;
+                                            }
+                                        }
+                                        if c.status == 2: HorizontalLayout {
+                                            spacing: 6px;
+                                            Text {
+                                                text: "Installed";
+                                                font-size: 13px;
+                                                color: text-secondary;
+                                                vertical-alignment: center;
+                                            }
+                                            Rectangle {
+                                                width: narrow ? 44px : 28px;
+                                                border-radius: 6px;
+                                                background: delete-touch.has-hover ? divider : transparent;
+                                                delete-touch := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => { delete-dict(i); }
+                                                }
+                                                Text {
+                                                    text: "×";
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                    font-size: 18px;
+                                                    color: text-secondary;
+                                                }
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            if c.status != 2: Rectangle {
+                                                width: 96px;
+                                                height: 30px;
+                                                border-radius: 6px;
+                                                background: c.status == 1
+                                                    ? divider
+                                                    : (dl-touch.has-hover ? accent : control-bg);
+                                                border-width: 1px;
+                                                border-color: divider;
+                                                Text {
+                                                    text: c.status == 1 ? Math.round(c.progress * 100) + "%" : "Download";
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                    font-size: 13px;
+                                                    color: (dl-touch.has-hover && c.status == 0) ? #ffffff : text-primary;
+                                                }
+                                                dl-touch := TouchArea {
+                                                    enabled: c.status == 0;
+                                                    mouse-cursor: self.enabled ? pointer : default;
+                                                    clicked => { download-dict(i); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ---- Appearance panel ----
+                    if index == 2 : VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 16px;
+                        alignment: start;
+
+                        // theme mode segmented control
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Text {
+                                text: "Theme";
+                                vertical-alignment: center;
+                                font-size: 14px;
+                                color: text-primary;
+                                width: 70px;
+                            }
+                            Rectangle {
+                                height: 30px;
+                                width: 240px;
+                                border-radius: 8px;
+                                background: control-bg;
+                                border-width: 1px;
+                                border-color: divider;
+                                HorizontalLayout {
+                                    padding: 3px;
+                                    spacing: 2px;
+                                    for seg[ti] in ["System", "Light", "Dark"]: Rectangle {
+                                        border-radius: 6px;
+                                        background: theme-mode == ti ? accent : transparent;
+                                        Text {
+                                            text: seg;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            font-size: 13px;
+                                            font-weight: theme-mode == ti ? 600 : 400;
+                                            color: theme-mode == ti ? #ffffff : text-secondary;
+                                        }
+                                        TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { set-theme-mode(ti); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // accent swatches (Auto + presets)
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Text {
+                                text: "Accent";
+                                vertical-alignment: center;
+                                font-size: 14px;
+                                color: text-primary;
+                                width: 70px;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                // "Auto" (follow the OS)
+                                Rectangle {
+                                    width: 44px;
+                                    height: 28px;
+                                    border-radius: 8px;
+                                    background: control-bg;
+                                    border-width: accent-choice == 0 ? 2px : 1px;
+                                    border-color: accent-choice == 0 ? accent : divider;
+                                    Text {
+                                        text: "Auto";
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        font-size: 11px;
+                                        color: text-secondary;
+                                    }
+                                    TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { set-accent(0); }
+                                    }
+                                }
+                                for sw[si] in accent-swatches: Rectangle {
+                                    width: 28px;
+                                    height: 28px;
+                                    border-radius: 14px;
+                                    background: sw;
+                                    border-width: accent-choice == si + 1 ? 3px : 0px;
+                                    border-color: text-primary;
+                                    TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { set-accent(si + 1); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+}
+
 component SelectableText inherits TextInput {
     read-only: true;
     single-line: false;
     wrap: word-wrap;
+}
+
+// The "All"/dictionary scope segmented control. Shared by the desktop toolbar
+// and the narrow-mode second toolbar row (where it scrolls horizontally).
+component ScopeBar inherits Rectangle {
+    in property <[string]> scopes: ["All"];
+    in property <int> scope: 0;
+    in property <color> accent;
+    in property <color> text-secondary;
+    in property <color> control-bg;
+    in property <color> divider;
+    callback selected(int);
+
+    width: scope-row.preferred-width;
+    height: 34px;
+    border-radius: 8px;
+    background: control-bg;
+    border-width: 1px;
+    border-color: divider;
+    scope-row := HorizontalLayout {
+        padding: 3px;
+        spacing: 2px;
+        for seg[idx] in scopes: Rectangle {
+            max-width: 180px;
+            border-radius: 6px;
+            background: scope == idx ? accent : transparent;
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                Text {
+                    text: seg;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-size: 13px;
+                    font-weight: scope == idx ? 600 : 400;
+                    color: scope == idx ? #ffffff : text-secondary;
+                    overflow: elide;
+                }
+            }
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => { selected(idx); }
+            }
+        }
+    }
 }
 
 export component AppWindow inherits Window {
@@ -85,11 +451,28 @@ export component AppWindow inherits Window {
     icon: @image-url("../assets/icons/hicolor/256x256/apps/irondict.png");
     preferred-width: 920px;
     preferred-height: 560px;
-    min-width: 640px;
+    min-width: 320px;
     min-height: 420px;
     default-font-family: "IBM Plex Sans";
     default-font-size: 14px;
     background: bg;
+
+    // Narrow (phone) layout: collapse the two-pane desktop view into a single
+    // pane and stack the toolbar. `narrow-def` is true while that pane shows the
+    // definition rather than the result list. Set imperatively (not as a binding)
+    // to avoid a layout binding loop through the window width.
+    in-out property <bool> narrow: false;
+    changed width => { root.narrow = self.width < 600px; }
+    in-out property <bool> narrow-def: true;
+    // Current vertical scroll of the results list. Kept on the root so keyboard
+    // navigation can move it without reaching into a conditional element.
+    in-out property <length> list-scroll-y: 0;
+    // On Android the soft keyboard must not pop up at launch, so focus the outer
+    // scope (which still receives Back) instead of the search field; the desktop
+    // build calls `focus-search` right after creating the window.
+    public function focus-search() {
+        search-input.focus();
+    }
 
     // ---- theming (accent + dark come from the OS, via Rust) ----
     // `os-accent` is the raw OS accent (defaults to indigo); `dark` mirrors the
@@ -97,22 +480,36 @@ export component AppWindow inherits Window {
     // flips with one boolean.
     in property <color> os-accent: #4f46e5;
     in property <bool> dark: false;
+    // On Android the system scheme arrives through Slint's built-in `Palette`;
+    // while the user hasn't forced a mode we follow it instead of `dark`.
+    in property <bool> follow-system: false;
+    property <bool> dark-mode: follow-system ? Palette.color-scheme == ColorScheme.dark : dark;
 
     // Accent is brightened a touch in dark mode so it stays legible as text/lines
     // against a dark background; the tint is a translucent wash that reads
     // correctly over whatever background it is drawn on.
-    property <color> accent: dark ? os-accent.brighter(0.35) : os-accent;
-    property <color> accent-tint: accent.with-alpha(dark ? 0.22 : 0.12);
+    property <color> accent: dark-mode ? os-accent.brighter(0.35) : os-accent;
+    property <color> accent-tint: accent.with-alpha(dark-mode ? 0.22 : 0.12);
 
-    property <color> bg: dark ? #1d1d20 : #ffffff;
-    property <color> control-bg: dark ? #2c2c30 : #ffffff;
-    property <color> text-primary: dark ? #f2f2f4 : #1c1c1e;
-    property <color> text-secondary: dark ? #98989e : #8a8a8e;
-    property <color> divider: dark ? #38383c : #ececec;
-    property <color> toolbar-bg: dark ? #252528 : #fafafa;
+    property <color> bg: dark-mode ? #1d1d20 : #ffffff;
+    property <color> control-bg: dark-mode ? #2c2c30 : #ffffff;
+    property <color> text-primary: dark-mode ? #f2f2f4 : #1c1c1e;
+    property <color> text-secondary: dark-mode ? #98989e : #8a8a8e;
+    property <color> divider: dark-mode ? #38383c : #ececec;
+    property <color> toolbar-bg: dark-mode ? #252528 : #fafafa;
+
+    // Whether the "Add dictionary…" button is shown. Local file import needs a
+    // filesystem path and a native picker, so it is hidden on Android.
+    in property <bool> can-add-local: true;
 
     // ---- state (driven by Rust) ----
     in-out property <string> query;
+    // `query` plus any in-progress IME composition (preedit). Slint keeps preedit
+    // out of `text` until the IME commits, so search/placeholder use this instead.
+    property <string> live-query: root.query + search-input.preedit-text;
+    // Body scroll offset, so a new page can reset it to the top without reaching
+    // into the (conditionally instantiated) definition pane.
+    in-out property <length> def-scroll-y;
     in property <[ResultItem]> results;
     in-out property <int> selected-index: 0;
     in property <bool> searching: false;
@@ -137,6 +534,15 @@ export component AppWindow inherits Window {
     in property <string> conj-label: "Conjugation";
     // The selected mood tab; the overlay shows only that mood's tense sections.
     in-out property <int> conj-tab: 0;
+    // Narrow conjugation carousel: page offset and page width, plus the desktop
+    // scroll offset the mood sidebar resets.
+    in-out property <length> conj-page-x: 0;
+    property <length> conj-page-w: root.width - 32px;
+    // 0 while a finger is dragging (so the page tracks it 1:1), animated for a
+    // tab tap or the post-drag snap.
+    in-out property <bool> conj-dragging: false;
+    animate conj-page-x { duration: conj-dragging ? 0ms : 280ms; easing: ease-out; }
+    in-out property <length> conj-scroll-y: 0;
     in-out property <bool> show-conjugation: false;
 
     // ---- settings page ----
@@ -146,6 +552,16 @@ export component AppWindow inherits Window {
     in property <int> theme-mode: 0;          // 0 System, 1 Light, 2 Dark
     in property <[color]> accent-swatches;
     in property <int> accent-choice: 0;       // 0 System, n = swatch n-1
+
+    // Settings tab (0 Dictionaries, 1 Downloads, 2 Appearance) and the narrow
+    // carousel offset. At the root so the tab bar and the carousel — which live
+    // in separate `if` branches — share it. While dragging, the offset follows
+    // the finger; otherwise changes animate (tab taps, snap).
+    in-out property <int> active-panel: 0;
+    in-out property <length> settings-page-x: 0;
+    property <length> settings-page-w: root.width - 32px;
+    property <bool> settings-dragging: false;
+    animate settings-page-x { duration: settings-dragging ? 0ms : 280ms; easing: ease-out; }
 
     // Back/forward navigation through visited definition pages.
     in property <bool> can-go-back: false;
@@ -168,19 +584,57 @@ export component AppWindow inherits Window {
     callback set-theme-mode(int);
     callback set-accent(int);
 
-    // Focus the search field on launch; global shortcuts still bubble up to the
-    // FocusScope below.
-    forward-focus: search-input;
+    // Focus the outer scope so Back is delivered without raising the soft
+    // keyboard; desktop focuses the search field via `focus-search`.
     init => {
-        search-input.focus();
+        root.narrow = root.width < 600px;
+        nav-scope.focus();
+    }
+
+    // Feed in-progress IME composition into the search as it is typed; when the
+    // IME commits, `edited` fires with the full text as usual.
+    changed live-query => {
+        if (search-input.preedit-text != "") {
+            // Composing text doesn't fire `edited`, so reveal the results list
+            // here too (otherwise typing while reading a definition keeps the
+            // definition pane showing the first match).
+            root.narrow-def = false;
+            root.query-changed(root.live-query);
+        }
+    }
+
+    // New page → jump the body back to the top. The old ListView did this on
+    // its own; the ScrollView doesn't.
+    changed def-headword => {
+        root.def-scroll-y = 0;
+    }
+
+    // Opening the conjugation overlay starts at the first mood; the narrow
+    // carousel's viewport-x defaults to 0, so keep the tab in sync.
+    changed show-conjugation => {
+        if (show-conjugation) {
+            conj-tab = 0;
+            root.conj-page-x = 0;
+        }
+    }
+
+    changed conj-tab => {
+        root.conj-page-x = -conj-tab * root.conj-page-w;
+    }
+
+    changed active-panel => {
+        root.settings-page-x = -active-panel * root.settings-page-w;
     }
 
     // Scroll the results list so row `idx` is fully visible (rows are 60px).
     function reveal-row(idx: int) {
-        if (idx * 60px < -result-list.viewport-y) {
-            result-list.viewport-y = -idx * 60px;
-        } else if ((idx + 1) * 60px > -result-list.viewport-y + result-list.visible-height) {
-            result-list.viewport-y = result-list.visible-height - (idx + 1) * 60px;
+        let row = 60px;
+        // Approximate viewport height (window minus toolbars and insets).
+        let vh = Math.max(root.height - 200px, 120px);
+        if (idx * row < -root.list-scroll-y) {
+            root.list-scroll-y = -idx * row;
+        } else if ((idx + 1) * row > -root.list-scroll-y + vh) {
+            root.list-scroll-y = vh - (idx + 1) * row;
         }
     }
 
@@ -199,6 +653,28 @@ export component AppWindow inherits Window {
             }
             return false;
         }
+        // Android Back: close the topmost layer, then leave a narrow-mode
+        // definition for the result list, then history back. Reject when nothing
+        // is left, so Android's default finishes the activity.
+        if (text == Key.Back) {
+            if (root.show-conjugation) {
+                root.show-conjugation = false;
+                return true;
+            }
+            if (root.show-settings) {
+                root.close-settings();
+                return true;
+            }
+            if (root.narrow && root.narrow-def) {
+                root.narrow-def = false;
+                return true;
+            }
+            if (root.can-go-back) {
+                root.navigate-back();
+                return true;
+            }
+            return false;
+        }
         // Alt+Left/Right: back/forward through the page history.
         if (alt && !root.show-settings && !root.show-conjugation) {
             if (text == Key.LeftArrow) {
@@ -210,7 +686,8 @@ export component AppWindow inherits Window {
                 return true;
             }
         }
-        if (!root.show-settings && !root.show-conjugation && root.results.length > 0) {
+        if (!root.show-settings && !root.show-conjugation && root.results.length > 0
+            && (!root.narrow || !root.narrow-def)) {
             if (text == Key.DownArrow) {
                 root.select(Math.min(root.selected-index + 1, root.results.length - 1));
                 root.reveal-row(root.selected-index);
@@ -225,7 +702,9 @@ export component AppWindow inherits Window {
         return false;
     }
 
-    FocusScope {
+    nav-scope := FocusScope {
+        width: root.width;
+        height: root.height;
         key-pressed(event) => {
             if (root.handle-nav-key(event.text, event.modifiers.alt)) {
                 return EventResult.accept;
@@ -258,77 +737,59 @@ export component AppWindow inherits Window {
             }
 
         VerticalLayout {
+        // Keep the whole UI clear of the status bar, gesture bar and display
+        // cutout. Zero on desktop.
+        padding-left: root.safe-area-insets.left;
+        padding-right: root.safe-area-insets.right;
+        padding-top: root.safe-area-insets.top;
+        padding-bottom: root.safe-area-insets.bottom;
         // ===================== toolbar =====================
         Rectangle {
             height: 52px;
             background: toolbar-bg;
 
-            // scope segmented control (left) — one segment per scope label,
-            // sized to its contents so it grows as dictionaries are added.
-            Rectangle {
+            // scope segmented control (desktop: inline; narrow: second row)
+            ScopeBar {
                 x: 16px;
                 y: (parent.height - self.height) / 2;
-                height: 30px;
-                width: scope-row.preferred-width;
-                border-radius: 8px;
-                background: control-bg;
-                border-width: 1px;
-                border-color: divider;
-                scope-row := HorizontalLayout {
-                    padding: 3px;
-                    spacing: 2px;
-                    for seg[idx] in root.scopes: Rectangle {
-                        max-width: 180px;
-                        border-radius: 6px;
-                        background: scope == idx ? accent : transparent;
-                        HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
-                            Text {
-                                text: seg;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                                font-size: 13px;
-                                font-weight: scope == idx ? 600 : 400;
-                                color: scope == idx ? #ffffff : text-secondary;
-                                overflow: elide;
-                            }
-                        }
-                        TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.scope-changed(idx); }
-                        }
-                    }
-                }
+                visible: !root.narrow;
+                scopes: root.scopes;
+                scope: root.scope;
+                accent: accent;
+                text-secondary: text-secondary;
+                control-bg: control-bg;
+                divider: divider;
+                selected(idx) => { root.narrow-def = false; root.scope-changed(idx); }
             }
 
             // settings gear (far right)
             Rectangle {
-                x: parent.width - self.width - 16px;
+                x: parent.width - self.width - (root.narrow ? 8px : 16px);
                 y: (parent.height - self.height) / 2;
-                width: 32px;
-                height: 32px;
+                width: root.narrow ? 44px : 32px;
+                height: root.narrow ? 44px : 32px;
                 border-radius: 8px;
                 background: gear-touch.has-hover ? divider : transparent;
                 gear-touch := TouchArea {
                     mouse-cursor: pointer;
                     clicked => { root.open-settings(); }
                 }
-                Text {
-                    text: "⚙";
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    font-size: 18px;
-                    color: text-secondary;
+                Image {
+                    x: (parent.width - 20px) / 2;
+                    y: (parent.height - 20px) / 2;
+                    width: 20px;
+                    height: 20px;
+                    source: @image-url("icons/gear.svg");
+                    colorize: text-secondary;
                 }
             }
 
             // search field (right, left of the gear)
             Rectangle {
-                x: parent.width - self.width - 16px - 32px - 10px;
+                x: root.narrow ? 12px : parent.width - self.width - 16px - 32px - 10px;
                 y: (parent.height - self.height) / 2;
-                height: 32px;
-                width: 260px;
+                height: root.narrow ? 40px : 32px;
+                width: root.narrow ? parent.width - 72px : 260px;
                 border-radius: 8px;
                 background: control-bg;
                 // Subtle at rest, accent ring on focus (colour only, so the inner
@@ -340,13 +801,19 @@ export component AppWindow inherits Window {
                     padding-right: 8px;
                     spacing: 7px;
                     // Leading search glyph, tinted to the accent while focused.
-                    Text {
+                    // (A stretched box with the icon absolutely centered, so it lines
+                    // up with the text regardless of the field height.)
+                    Rectangle {
                         width: 16px;
-                        text: "⌕";
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                        font-size: 17px;
-                        color: search-input.has-focus ? accent : text-secondary;
+                        vertical-stretch: 1;
+                        Image {
+                            x: 0;
+                            y: (parent.height - 16px) / 2;
+                            width: 16px;
+                            height: 16px;
+                            source: @image-url("icons/search.svg");
+                            colorize: search-input.has-focus ? accent : text-secondary;
+                        }
                     }
                     // Text area: stretches to fill, with the input and placeholder
                     // both pinned left so the caret starts here (not centered).
@@ -358,7 +825,7 @@ export component AppWindow inherits Window {
                         Text {
                             x: 0;
                             width: parent.width;
-                            visible: root.query == "";
+                            visible: root.live-query == "";
                             // "Indexing…" only during a real (re)build; otherwise
                             // a plain prompt, including the brief startup window
                             // where the engine is opening its cached index.
@@ -377,7 +844,7 @@ export component AppWindow inherits Window {
                             color: text-primary;
                             single-line: true;
                             text <=> root.query;
-                            edited => { root.query-changed(self.text); }
+                            edited => { root.narrow-def = false; root.query-changed(self.text); }
                             // Intercept Esc/Up/Down here: a focused TextInput's
                             // key-pressed runs before it consumes the arrows for
                             // cursor movement, so the FocusScope never sees them.
@@ -390,23 +857,29 @@ export component AppWindow inherits Window {
                     }
                     // Clear button, shown only while there's a query.
                     Rectangle {
-                        width: 18px;
-                        visible: root.query != "";
-                        border-radius: 9px;
+                        width: root.narrow ? 44px : 18px;
+                        border-radius: root.narrow ? 10px : 9px;
+                        visible: root.live-query != "";
                         background: clear-touch.has-hover ? divider : transparent;
                         clear-touch := TouchArea {
                             mouse-cursor: pointer;
                             clicked => {
+                                // On Android the IME keeps the in-progress word as
+                                // preedit, which `query = ""` can't clear. Drop
+                                // focus first so the backend commits the preedit
+                                // into `text`, then clear and refocus.
+                                search-input.clear-focus();
                                 root.query = "";
+                                root.narrow-def = true;
                                 root.query-changed("");
                                 search-input.focus();
                             }
                         }
                         Text {
-                            text: "✕";
+                            text: "×";
                             horizontal-alignment: center;
                             vertical-alignment: center;
-                            font-size: 11px;
+                            font-size: 15px;
                             color: clear-touch.has-hover ? text-primary : text-secondary;
                         }
                     }
@@ -414,6 +887,41 @@ export component AppWindow inherits Window {
             }
 
             // bottom hairline
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: divider;
+            }
+        }
+
+        // ===================== narrow scope row =====================
+        // The toolbar's scope segments, on their own horizontally scrollable row
+        // so the search field can take the full width on a phone.
+        if root.narrow : Rectangle {
+            height: 44px;
+            background: toolbar-bg;
+            Flickable {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                interactive: true;
+                viewport-width: scope-content.preferred-width + 24px;
+                viewport-height: parent.height;
+                scope-content := HorizontalLayout {
+                    x: 12px;
+                    y: 5px;
+                    ScopeBar {
+                        scopes: root.scopes;
+                        scope: root.scope;
+                        accent: accent;
+                        text-secondary: text-secondary;
+                        control-bg: control-bg;
+                        divider: divider;
+                        selected(idx) => { root.narrow-def = false; root.scope-changed(idx); }
+                    }
+                }
+            }
             Rectangle {
                 y: parent.height - 1px;
                 height: 1px;
@@ -439,11 +947,14 @@ export component AppWindow inherits Window {
 
         // ===================== body =====================
         HorizontalLayout {
-            // results column (always visible)
-            Rectangle {
-                width: 244px;
+            // results column (desktop always; narrow only while searching, so the
+            // definition can use the full width)
+            if !root.narrow || !root.narrow-def : Rectangle {
+                preferred-width: root.narrow ? 0px : 244px;
+                horizontal-stretch: root.narrow ? 1 : 0;
                 background: bg;
                 result-list := ListView {
+                    viewport-y <=> root.list-scroll-y;
                     for item[i] in results: Rectangle {
                         height: 60px;
                         background: i == root.selected-index ? accent-tint : transparent;
@@ -456,7 +967,12 @@ export component AppWindow inherits Window {
                         }
                         TouchArea {
                             mouse-cursor: pointer;
-                            clicked => { root.select(i); }
+                            clicked => {
+                                root.select(i);
+                                root.narrow-def = true;
+                                // Hide the soft keyboard on Android.
+                                if (root.narrow) { nav-scope.focus(); }
+                            }
                         }
                         VerticalLayout {
                             padding-left: 17px;
@@ -501,22 +1017,27 @@ export component AppWindow inherits Window {
                 Rectangle {
                     x: parent.width - 1px;
                     width: 1px;
+                    visible: !root.narrow;
                     background: divider;
                 }
             }
 
             // definition pane (the hero). The header/pill stay fixed; only the
-            // body scrolls — and it is a ListView so huge entries (e.g. 60 KB
-            // HTML dictionary entries) are virtualized and stay at 60fps.
-            Rectangle {
+            // body scrolls. The body is a ScrollView over a plain VerticalLayout
+            // so block heights are exact (a ListView re-estimates them mid-fling
+            // and makes long entries jump).
+            if !root.narrow || root.narrow-def : Rectangle {
                 horizontal-stretch: 1;
                 background: bg;
                 VerticalLayout {
-                    padding-left: 40px;
-                    padding-right: 40px;
-                    padding-top: 36px;
+                    padding-left: root.narrow ? 16px : 40px;
+                    padding-right: root.narrow ? 16px : 40px;
+                    padding-top: root.narrow ? 12px : 36px;
                     padding-bottom: 28px;
                     spacing: 10px;
+
+                    // (No on-screen Back button: the system Back key/gesture
+                    // returns from a narrow definition to the result list.)
 
                     // Hidden header lines use `if` (not `visible`) so they reserve
                     // no layout space — otherwise the gap below the headword grows
@@ -529,7 +1050,7 @@ export component AppWindow inherits Window {
                     }
                     headword-sel := SelectableText {
                         text: def-headword;
-                        font-size: 30px;
+                        font-size: root.narrow ? 24px : 30px;
                         font-weight: 600;
                         color: text-primary;
                     }
@@ -548,12 +1069,25 @@ export component AppWindow inherits Window {
                         wrap: word-wrap;
                     }
 
-                    // body: paragraphs / numbered senses (virtualized).
-                    // Each block renders as markdown so cross-references like
-                    // {tenir} become clickable inline links.
-                    ListView {
+                    // body: paragraphs / numbered senses. A ScrollView (not a
+                    // ListView) so exact heights are known up front: a ListView
+                    // re-estimates item heights during a fling, which makes long
+                    // entries jump. Material's ScrollView pans on touch too.
+                    def-scroll := ScrollView {
                         vertical-stretch: 1;
-                        for b[i] in def-blocks: HorizontalLayout {
+                        horizontal-stretch: 1;
+                        viewport-y <=> root.def-scroll-y;
+                        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                        VerticalLayout {
+                            // Match the flickable's inner width exactly so the body
+                            // can never pan sideways by the scrollbar's reserve.
+                            width: def-scroll.visible-width;
+                            // pack rows at their natural height; the default
+                            // `stretch` would spread the viewport's spare space
+                            // between rows (huge gaps on short entries).
+                            alignment: start;
+                            for b[i] in def-blocks: HorizontalLayout {
+                            width: parent.width;
                             spacing: 8px;
                             alignment: start;
                             // headings and the trailing button get extra breathing
@@ -605,7 +1139,7 @@ export component AppWindow inherits Window {
                                         color: conj-btn.has-hover ? #ffffff : accent;
                                     }
                                     Text {
-                                        text: "▸";
+                                        text: ">";
                                         vertical-alignment: center;
                                         font-size: 13px;
                                         color: conj-btn.has-hover ? #ffffff : accent;
@@ -632,6 +1166,7 @@ export component AppWindow inherits Window {
                                 wrap: word-wrap;
                                 horizontal-stretch: 1;
                             }
+                        }
                         }
                     }
 
@@ -674,21 +1209,22 @@ export component AppWindow inherits Window {
 
         // panel (centered)
         Rectangle {
-            // Which settings panel is shown: 0 Dictionaries, 1 Downloads,
-            // 2 Appearance. Local UI state — not persisted.
-            property <int> active-panel: 0;
-            width: min(720px, root.width - 80px);
-            height: min(640px, root.height - 80px);
+            // 0 Dictionaries, 1 Downloads, 2 Appearance (root property).
+            width: root.narrow ? root.width : min(720px, root.width - 80px);
+            height: root.narrow ? root.height : min(640px, root.height - 80px);
             background: bg;
-            border-radius: 14px;
+            border-radius: root.narrow ? 0px : 14px;
             border-width: 1px;
             border-color: divider;
             // absorb clicks so they don't fall through to the backdrop
             TouchArea {}
 
             VerticalLayout {
-                padding: 24px;
-                spacing: 16px;
+                    padding-left: root.narrow ? 16px : 24px;
+                    padding-right: root.narrow ? 16px : 24px;
+                    padding-top: root.narrow ? (12px + root.safe-area-insets.top) : 24px;
+                    padding-bottom: root.narrow ? (12px + root.safe-area-insets.bottom) : 24px;
+                    spacing: 16px;
 
                 // header
                 HorizontalLayout {
@@ -700,8 +1236,8 @@ export component AppWindow inherits Window {
                         horizontal-stretch: 1;
                     }
                     Rectangle {
-                        width: 28px;
-                        height: 28px;
+                        width: root.narrow ? 44px : 28px;
+                        height: root.narrow ? 44px : 28px;
                         border-radius: 6px;
                         background: close-touch.has-hover ? divider : transparent;
                         close-touch := TouchArea {
@@ -709,10 +1245,35 @@ export component AppWindow inherits Window {
                             clicked => { root.close-settings(); }
                         }
                         Text {
-                            text: "✕";
+                            text: "×";
                             horizontal-alignment: center;
                             vertical-alignment: center;
+                            font-size: root.narrow ? 24px : 18px;
                             color: text-secondary;
+                        }
+                    }
+                }
+
+                // narrow: settings sections as top tabs
+                if root.narrow : HorizontalLayout {
+                    spacing: 4px;
+                    for item[ni] in ["Dictionaries", "Downloads", "Appearance"]: Rectangle {
+                        height: 36px;
+                        horizontal-stretch: 1;
+                        border-radius: 8px;
+                        background: active-panel == ni ? divider : transparent;
+                        Text {
+                            text: item;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            font-size: 12px;
+                            font-weight: active-panel == ni ? 600 : 400;
+                            color: active-panel == ni ? accent : text-primary;
+                            overflow: elide;
+                        }
+                        top-tab-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { active-panel = ni; }
                         }
                     }
                 }
@@ -721,8 +1282,8 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     spacing: 20px;
 
-                    // sidebar
-                    VerticalLayout {
+                    // sidebar (desktop; narrow uses the tabs above)
+                    if !root.narrow : VerticalLayout {
                         width: 150px;
                         spacing: 4px;
                         alignment: start;
@@ -749,271 +1310,106 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // ---- Dictionaries panel ----
-                    if active-panel == 0 : VerticalLayout {
-                        horizontal-stretch: 1;
-                        spacing: 12px;
-                        ScrollView {
-                            vertical-stretch: 1;
-                            VerticalLayout {
-                                spacing: 8px;
-                                alignment: start;
-                                for d[i] in dict-items: Rectangle {
-                                    height: 58px;
-                                    border-radius: 8px;
-                                    background: control-bg;
-                                    border-width: 1px;
-                                    border-color: divider;
-                                    HorizontalLayout {
-                                        padding-left: 12px;
-                                        padding-right: 12px;
-                                        spacing: 10px;
-                                        VerticalLayout {
-                                            horizontal-stretch: 1;
-                                            alignment: center;
-                                            spacing: 2px;
-                                            Text {
-                                                text: d.name;
-                                                font-size: 14px;
-                                                font-weight: 500;
-                                                color: text-primary;
-                                                overflow: elide;
-                                            }
-                                            Text {
-                                                text: d.words + " words";
-                                                font-size: 12px;
-                                                color: text-secondary;
-                                            }
-                                        }
-                                        VerticalLayout {
-                                            alignment: center;
-                                            ComboBox {
-                                                width: 116px;
-                                                model: ["Auto", "English", "French", "Italian"];
-                                                current-index: d.language;
-                                                selected => { root.set-dict-language(i, self.current-index); }
-                                            }
-                                        }
-                                        VerticalLayout {
-                                            alignment: center;
-                                            Switch {
-                                                checked: d.enabled;
-                                                toggled => { root.toggle-dict(i); }
-                                            }
-                                        }
-                                        Rectangle {
-                                            width: 28px;
-                                            background: remove-touch.has-hover ? divider : transparent;
-                                            border-radius: 6px;
-                                            remove-touch := TouchArea {
-                                                mouse-cursor: pointer;
-                                                clicked => { root.remove-dict(i); }
-                                            }
-                                            Text {
-                                                text: "✕";
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                                font-size: 13px;
-                                                color: text-secondary;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        HorizontalLayout {
-                            alignment: start;
-                            Button {
-                                text: "Add dictionary…";
-                                clicked => { root.add-dict(); }
-                            }
-                        }
+                    // desktop: the active panel
+                    if !root.narrow : SettingsPanelBody {
+                        index: active-panel;
+                        narrow: root.narrow;
+                        dict-items: root.dict-items;
+                        can-add-local: root.can-add-local;
+                        catalog-items: root.catalog-items;
+                        theme-mode: root.theme-mode;
+                        accent-choice: root.accent-choice;
+                        accent-swatches: root.accent-swatches;
+                        accent: accent;
+                        accent-tint: accent-tint;
+                        bg: bg;
+                        control-bg: control-bg;
+                        text-primary: text-primary;
+                        text-secondary: text-secondary;
+                        divider: divider;
+                        set-dict-language(i, l) => { root.set-dict-language(i, l); }
+                        toggle-dict(i) => { root.toggle-dict(i); }
+                        remove-dict(i) => { root.remove-dict(i); }
+                        add-dict() => { root.add-dict(); }
+                        delete-dict(i) => { root.delete-dict(i); }
+                        download-dict(i) => { root.download-dict(i); }
+                        set-theme-mode(m) => { root.set-theme-mode(m); }
+                        set-accent(a) => { root.set-accent(a); }
                     }
 
-                    // ---- Downloads panel ----
-                    if active-panel == 1 : VerticalLayout {
+                    // narrow: the three panels side by side in a Flickable so the
+                    // page follows the finger; it snaps to the nearest after the
+                    // drag settles.
+                    if root.narrow : settings-swipe := SwipePanel {
                         horizontal-stretch: 1;
-                        spacing: 12px;
-                        ScrollView {
-                            vertical-stretch: 1;
-                            VerticalLayout {
-                                spacing: 8px;
-                                alignment: start;
-                                for c[i] in catalog-items: Rectangle {
-                                    height: 50px;
-                                    border-radius: 8px;
-                                    background: control-bg;
-                                    border-width: 1px;
-                                    border-color: divider;
-                                    HorizontalLayout {
-                                        padding-left: 12px;
-                                        padding-right: 12px;
-                                        spacing: 10px;
-                                        VerticalLayout {
-                                            horizontal-stretch: 1;
-                                            alignment: center;
-                                            spacing: 2px;
-                                            Text {
-                                                text: c.label;
-                                                font-size: 14px;
-                                                font-weight: 500;
-                                                color: text-primary;
-                                                overflow: elide;
-                                            }
-                                            Text {
-                                                text: c.status == 1
-                                                    ? "Downloading… " + Math.round(c.progress * 100) + "%"
-                                                    : c.detail;
-                                                font-size: 12px;
-                                                color: text-secondary;
-                                            }
-                                        }
-                                        if c.status == 2: HorizontalLayout {
-                                            spacing: 6px;
-                                            Text {
-                                                text: "✓ Installed";
-                                                font-size: 13px;
-                                                color: text-secondary;
-                                                vertical-alignment: center;
-                                            }
-                                            Rectangle {
-                                                width: 28px;
-                                                border-radius: 6px;
-                                                background: delete-touch.has-hover ? divider : transparent;
-                                                delete-touch := TouchArea {
-                                                    mouse-cursor: pointer;
-                                                    clicked => { root.delete-dict(i); }
-                                                }
-                                                Text {
-                                                    text: "🗑";
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
-                                                    font-size: 13px;
-                                                    color: text-secondary;
-                                                }
-                                            }
-                                        }
-                                        VerticalLayout {
-                                            alignment: center;
-                                            if c.status != 2: Rectangle {
-                                                width: 96px;
-                                                height: 30px;
-                                                border-radius: 6px;
-                                                background: c.status == 1
-                                                    ? divider
-                                                    : (dl-touch.has-hover ? accent : control-bg);
-                                                border-width: 1px;
-                                                border-color: divider;
-                                                Text {
-                                                    text: c.status == 1 ? Math.round(c.progress * 100) + "%" : "Download";
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
-                                                    font-size: 13px;
-                                                    color: (dl-touch.has-hover && c.status == 0) ? #ffffff : text-primary;
-                                                }
-                                                dl-touch := TouchArea {
-                                                    enabled: c.status == 0;
-                                                    mouse-cursor: self.enabled ? pointer : default;
-                                                    clicked => { root.download-dict(i); }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                        vertical-stretch: 1;
+                        handle-swipe-left: true;
+                        handle-swipe-right: true;
+                        moved => {
+                            if (self.swiping) {
+                                root.settings-dragging = true;
+                                let base = -(active-panel * settings-swipe.width);
+                                let raw = base + (self.current-position.x - self.pressed-position.x);
+                                let min-x = -(settings-swipe.width * 2);
+                                root.settings-page-x = raw < min-x ? min-x : (raw > 0px ? 0px : raw);
                             }
                         }
-                    }
-
-                    // ---- Appearance panel ----
-                    if active-panel == 2 : VerticalLayout {
-                        horizontal-stretch: 1;
-                        spacing: 16px;
-                        alignment: start;
-
-                        // theme mode segmented control
-                        HorizontalLayout {
-                            spacing: 12px;
-                            Text {
-                                text: "Theme";
-                                vertical-alignment: center;
-                                font-size: 14px;
-                                color: text-primary;
-                                width: 70px;
+                        swiped => {
+                            root.settings-dragging = false;
+                            let dx = self.current-position.x - self.pressed-position.x;
+                            let w = settings-swipe.width;
+                            if (dx < -(w / 3) && active-panel < 2) {
+                                active-panel += 1;
+                            } else if (dx > w / 3 && active-panel > 0) {
+                                active-panel -= 1;
                             }
+                            root.settings-page-x = -(active-panel * w);
+                        }
+                        cancelled => {
+                            root.settings-dragging = false;
+                            root.settings-page-x = -(active-panel * settings-swipe.width);
+                        }
+                        // Accepts unpressed moves so the nested ScrollViews keep
+                        // scrolling while this handler watches for horizontal swipes.
+                        TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                        }
+                        Rectangle {
+                            width: parent.width;
+                            height: parent.height;
+                            clip: true;
                             Rectangle {
-                                height: 30px;
-                                width: 240px;
-                                border-radius: 8px;
-                                background: control-bg;
-                                border-width: 1px;
-                                border-color: divider;
-                                HorizontalLayout {
-                                    padding: 3px;
-                                    spacing: 2px;
-                                    for seg[ti] in ["System", "Light", "Dark"]: Rectangle {
-                                        border-radius: 6px;
-                                        background: theme-mode == ti ? accent : transparent;
-                                        Text {
-                                            text: seg;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                            font-size: 13px;
-                                            font-weight: theme-mode == ti ? 600 : 400;
-                                            color: theme-mode == ti ? #ffffff : text-secondary;
-                                        }
-                                        TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => { root.set-theme-mode(ti); }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // accent swatches (Auto + presets)
-                        HorizontalLayout {
-                            spacing: 12px;
-                            Text {
-                                text: "Accent";
-                                vertical-alignment: center;
-                                font-size: 14px;
-                                color: text-primary;
-                                width: 70px;
-                            }
-                            HorizontalLayout {
-                                spacing: 8px;
-                                alignment: start;
-                                // "Auto" (follow the OS)
-                                Rectangle {
-                                    width: 44px;
-                                    height: 28px;
-                                    border-radius: 8px;
-                                    background: control-bg;
-                                    border-width: accent-choice == 0 ? 2px : 1px;
-                                    border-color: accent-choice == 0 ? accent : divider;
-                                    Text {
-                                        text: "Auto";
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                        font-size: 11px;
-                                        color: text-secondary;
-                                    }
-                                    TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => { root.set-accent(0); }
-                                    }
-                                }
-                                for sw[si] in accent-swatches: Rectangle {
-                                    width: 28px;
-                                    height: 28px;
-                                    border-radius: 14px;
-                                    background: sw;
-                                    border-width: accent-choice == si + 1 ? 3px : 0px;
-                                    border-color: text-primary;
-                                    TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => { root.set-accent(si + 1); }
-                                    }
+                                x: root.settings-page-x;
+                                width: settings-swipe.width * 3;
+                                height: parent.height;
+                                for idx in [0, 1, 2] : SettingsPanelBody {
+                                    index: idx;
+                                    narrow: root.narrow;
+                                    x: idx * settings-swipe.width;
+                                    width: settings-swipe.width;
+                                    height: parent.height;
+                                    dict-items: root.dict-items;
+                                    can-add-local: root.can-add-local;
+                                    catalog-items: root.catalog-items;
+                                    theme-mode: root.theme-mode;
+                                    accent-choice: root.accent-choice;
+                                    accent-swatches: root.accent-swatches;
+                                    accent: accent;
+                                    accent-tint: accent-tint;
+                                    bg: bg;
+                                    control-bg: control-bg;
+                                    text-primary: text-primary;
+                                    text-secondary: text-secondary;
+                                    divider: divider;
+                                    set-dict-language(i, l) => { root.set-dict-language(i, l); }
+                                    toggle-dict(i) => { root.toggle-dict(i); }
+                                    remove-dict(i) => { root.remove-dict(i); }
+                                    add-dict() => { root.add-dict(); }
+                                    delete-dict(i) => { root.delete-dict(i); }
+                                    download-dict(i) => { root.download-dict(i); }
+                                    set-theme-mode(m) => { root.set-theme-mode(m); }
+                                    set-accent(a) => { root.set-accent(a); }
                                 }
                             }
                         }
@@ -1033,18 +1429,21 @@ export component AppWindow inherits Window {
 
         // panel (centered)
         Rectangle {
-            width: min(620px, root.width - 80px);
-            height: min(640px, root.height - 80px);
+            width: root.narrow ? root.width : min(620px, root.width - 80px);
+            height: root.narrow ? root.height : min(640px, root.height - 80px);
             background: bg;
-            border-radius: 14px;
+            border-radius: root.narrow ? 0px : 14px;
             border-width: 1px;
             border-color: divider;
             // absorb clicks so they don't fall through to the backdrop
             TouchArea {}
 
             VerticalLayout {
-                padding: 24px;
-                spacing: 14px;
+                    padding-left: root.narrow ? 16px : 24px;
+                    padding-right: root.narrow ? 16px : 24px;
+                    padding-top: root.narrow ? (12px + root.safe-area-insets.top) : 24px;
+                    padding-bottom: root.narrow ? (12px + root.safe-area-insets.bottom) : 24px;
+                    spacing: 14px;
 
                 // header
                 HorizontalLayout {
@@ -1057,8 +1456,8 @@ export component AppWindow inherits Window {
                         overflow: elide;
                     }
                     Rectangle {
-                        width: 28px;
-                        height: 28px;
+                        width: root.narrow ? 44px : 28px;
+                        height: root.narrow ? 44px : 28px;
                         border-radius: 6px;
                         background: conj-close.has-hover ? divider : transparent;
                         conj-close := TouchArea {
@@ -1066,21 +1465,50 @@ export component AppWindow inherits Window {
                             clicked => { root.show-conjugation = false; }
                         }
                         Text {
-                            text: "✕";
+                            text: "×";
                             horizontal-alignment: center;
                             vertical-alignment: center;
+                            font-size: root.narrow ? 24px : 18px;
                             color: text-secondary;
                         }
                     }
                 }
 
-                // body: mood tabs on the left, the active mood's tenses right
+                // narrow: mood tabs across the top
+                if root.narrow && conjugation.length > 1 : HorizontalLayout {
+                    spacing: 4px;
+                    for mood[ti] in conjugation: Rectangle {
+                        height: 36px;
+                        horizontal-stretch: 1;
+                        border-radius: 8px;
+                        background: conj-tab == ti ? divider : transparent;
+                        Text {
+                            text: mood.label;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            font-size: 12px;
+                            font-weight: conj-tab == ti ? 600 : 400;
+                            color: conj-tab == ti ? accent : text-primary;
+                            overflow: elide;
+                        }
+                        mood-top-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { conj-tab = ti; }
+                        }
+                    }
+                }
+
+                // body: mood tabs on the left (desktop), or a swipeable mood
+                // carousel (narrow). The carousel is a horizontal Flickable with
+                // one page per mood, so a swipe flips between moods and each page
+                // keeps its own vertical scroll position.
                 HorizontalLayout {
                     spacing: 20px;
                     vertical-stretch: 1;
 
-                    // mood tabs (hidden when there's only one, e.g. English)
-                    if conjugation.length > 1 : VerticalLayout {
+                    // mood tabs (hidden when there's only one, e.g. English; and
+                    // on narrow, where they move above)
+                    if !root.narrow && conjugation.length > 1 : VerticalLayout {
                         width: 140px;
                         spacing: 4px;
                         alignment: start;
@@ -1107,15 +1535,18 @@ export component AppWindow inherits Window {
                                 clicked => {
                                     conj-tab = ti;
                                     // start the new mood's tenses from the top
-                                    conj-scroll.viewport-y = 0;
+                                    root.conj-scroll-y = 0;
                                 }
                             }
                         }
                     }
 
-                    conj-scroll := ScrollView {
+                    // desktop: the active mood's tenses
+                    if !root.narrow : ScrollView {
                         horizontal-stretch: 1;
                         vertical-stretch: 1;
+                        viewport-y <=> root.conj-scroll-y;
+                        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
                         VerticalLayout {
                             spacing: 14px;
                             alignment: start;
@@ -1145,6 +1576,91 @@ export component AppWindow inherits Window {
                                         horizontal-stretch: 1;
                                     }
                                 }
+                            }
+                        }
+                    }
+
+                    // narrow: one page per mood, swipe left/right to change mood
+                    if root.narrow : conj-swipe := SwipePanel {
+                        horizontal-stretch: 1;
+                        vertical-stretch: 1;
+                        handle-swipe-left: true;
+                        handle-swipe-right: true;
+                        moved => {
+                            if (self.swiping) {
+                                root.conj-dragging = true;
+                                let base = -(conj-tab * conj-swipe.width);
+                                let raw = base + (self.current-position.x - self.pressed-position.x);
+                                let min-x = -((conjugation.length - 1) * conj-swipe.width);
+                                root.conj-page-x = raw < min-x ? min-x : (raw > 0px ? 0px : raw);
+                            }
+                        }
+                        swiped => {
+                            root.conj-dragging = false;
+                            let dx = self.current-position.x - self.pressed-position.x;
+                            let w = conj-swipe.width;
+                            if (dx < -(w / 3) && conj-tab < conjugation.length - 1) {
+                                conj-tab += 1;
+                            } else if (dx > w / 3 && conj-tab > 0) {
+                                conj-tab -= 1;
+                            }
+                            root.conj-page-x = -(conj-tab * w);
+                        }
+                        cancelled => {
+                            root.conj-dragging = false;
+                            root.conj-page-x = -(conj-tab * conj-swipe.width);
+                        }
+                        // Accepts unpressed moves so the nested ScrollViews keep
+                        // scrolling while this handler watches for horizontal swipes.
+                        TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                        }
+                        Rectangle {
+                            width: parent.width;
+                            height: parent.height;
+                            clip: true;
+                            Rectangle {
+                                x: root.conj-page-x;
+                                width: conj-swipe.width * conjugation.length;
+                                height: parent.height;
+                                for mood[ti] in conjugation: ScrollView {
+                                x: ti * conj-swipe.width;
+                                width: conj-swipe.width;
+                                height: parent.height;
+                                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                                VerticalLayout {
+                                    spacing: 14px;
+                                    alignment: start;
+                                    for sec in mood.sections : VerticalLayout {
+                                        spacing: 4px;
+                                        Text {
+                                            text: sec.label;
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                            color: accent;
+                                        }
+                                        for f in sec.forms: HorizontalLayout {
+                                            spacing: 8px;
+                                            alignment: start;
+                                            Text {
+                                                text: f.label;
+                                                font-size: 13px;
+                                                color: text-secondary;
+                                                width: 150px;
+                                                overflow: elide;
+                                            }
+                                            SelectableText {
+                                                text: f.text;
+                                                font-size: 14px;
+                                                font-weight: 500;
+                                                color: text-primary;
+                                                horizontal-stretch: 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             }
                         }
                     }

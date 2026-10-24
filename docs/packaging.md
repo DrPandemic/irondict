@@ -97,3 +97,111 @@ done
 
 A binary distribution must therefore carry the irondict `LICENSE`, the GCIDE
 notice (via `docs/gcide.md`), and the SIL OFL for IBM Plex Sans.
+
+## Android (arm64 APK)
+
+The GUI also ships as an Android APK built with
+[`cargo-apk`](https://github.com/rust-mobile/cargo-apk). A single `cdylib`,
+`crates/android` (`irondict-android`), provides the `android_main` entry point and
+the packaging metadata; the window and all behaviour are the same code as the
+desktop GUI (`crates/app`, linked as a library). The APK works on plain AOSP — no
+Google Play services or libraries.
+
+### Toolchain
+
+- `rustup target add aarch64-linux-android x86_64-linux-android`
+  (x86_64 is for the emulator).
+- `cargo install cargo-apk`.
+- A JDK plus the Android SDK/NDK. The Slint Android backend's `build.rs` compiles
+a Java helper with `javac`/`d8`, so `d8` from build-tools < 35 breaks on JDK ≥ 21;
+keep build-tools ≥ 35 installed. NDK r28+ links for 16 KB pages by default
+(NDK 30 is used here).
+- Environment: `ANDROID_HOME`, `ANDROID_NDK_ROOT`, `ANDROID_PLATFORM=android-35`,
+  `JAVA_HOME` (Android Studio's `jbr` works).
+
+### Build
+
+```sh
+ANDROID_HOME=$ANDROID_HOME \
+ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/30.0.16248370 \
+ANDROID_PLATFORM=android-35 \
+JAVA_HOME=/opt/android-studio/jbr \
+CARGO_APK_RELEASE_KEYSTORE=$HOME/.android/debug.keystore \
+CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android \
+cargo apk build -p irondict-android --lib --release --target x86_64-linux-android
+```
+
+The signed APK lands at `target/release/apk/irondict-android.apk`. `cargo-apk`
+derives `versionName` from the workspace `package.version` (`version_code` from its
+semver), so the single workspace version drives both desktop and Android.
+
+`build_targets` in `crates/android/Cargo.toml` lists `aarch64-linux-android`
+(the shipping target) and `x86_64-linux-android` (the emulator); drop x86_64 for a
+release APK. Release keystores are supplied through the
+`CARGO_APK_RELEASE_KEYSTORE[_PASSWORD]` environment variables and must be kept
+**outside the repository**; the debug keystore above is for local testing only.
+
+### Bundled GCIDE
+
+The SDK's `assets` metadata points at `crates/core/assets`, so the APK carries
+`assets/gcide/`. Core reads the StarDict files through a source abstraction
+(`irondict_core::DictSource`): a filesystem path, a byte range of an open file, or
+an owned buffer. On Android the entry point opens each asset:
+
+- `.dict.dz` is stored uncompressed by `aapt`, so `AAsset_openFileDescriptor64`
+succeeds and it is memory-mapped **in place** from `base.apk` (no 34 MB copy, no
+extraction to disk).
+- `.idx` and `.ifo` come out deflated, so they are read into memory.
+
+Run the guard after a build to assert the mapping precondition still holds:
+
+```sh
+crates/android/verify-apk-assets.sh target/release/apk/irondict-android.apk
+```
+
+### On-device notes
+
+- Verify on a `default` (AOSP) system image, not a `google_apis*` one.
+- `directories` can't find a home on Android, so `android_main` sets `HOME` to
+the app's internal data directory before the backend starts; config, data and the
+search-index cache then land under it.
+- `eprintln!` is invisible on Android, so logs and panics are routed to logcat
+under the `irondict` tag.
+- The narrow (phone) layout is selected at runtime (`root.width < 600px`); the same
+build is the desktop layout when the window is wide.
+- Android builds the UI with Slint's **material** style (`crates/app/build.rs`);
+desktop keeps `fluent`. Fluent's `ScrollView` sets `flickable.interactive: false`,
+which disables touch drag-panning, so definitions/results wouldn't scroll on a
+phone. Material also gives the Settings widgets a native feel; its ComboBox is
+wider, so the dictionary row pins its width and disables the horizontal
+scrollbar.
+- The app theme (`crates/android/res/values/styles.xml`) forces
+`windowLightStatusBar`/`windowLightNavigationBar`, so the system clock and status
+icons stay dark and readable over the light UI (Android 15+ draws apps
+edge-to-edge).
+- The definition body is a `ScrollView` over a `VerticalLayout`, not a `ListView`.
+`ListView` re-estimates item heights during a fling, which makes long entries
+jump ~200px mid-scroll; realizing every block keeps heights exact and scrolling
+smooth. Two details matter: the inner layout uses `alignment: start` (the default
+`stretch` spreads the viewport's spare space between rows, opening big gaps on
+short entries), and its `width` is bound to `def-scroll.visible-width` so the body
+can't pan sideways by the vertical scrollbar's reserve.
+- On phones the settings panel and the conjugation overlay are finger-following
+pagers. Both render their tab pages side by side and translate them with a
+`SwipePanel` (a `SwipeGestureHandler` that hosts the content, with a background
+`TouchArea {}` so nested vertical `ScrollView`s keep scrolling). `moved` tracks
+the finger, `swiped` snaps to the nearest page (a drag past ~1/3 of the width
+switches, otherwise it snaps back), and `cancelled` restores the current page. A
+`Flickable` was tried first but its fling animation kept overriding the snap and
+left the page between tabs. The page offset is an `in-out` root property whose
+`animate` duration is `0` while dragging (1:1 tracking) and animated for tab taps
+and the snap.
+- The launcher icon is an **adaptive icon**
+(`res/mipmap-anydpi-v26/ic_launcher.xml` + `res/drawable/ic_launcher_foreground.xml`,
+background `@color/ic_launcher_background` `#4F46E5`). Without it Android treats
+the legacy `mipmap-*/ic_launcher.png` as a pre-8.0 icon and draws it as a small
+tile inside a white circle. The full-bleed tile colour is also painted in the
+foreground so launchers that tint/override the background still show the indigo
+square; the artwork matches `crates/app/assets/icons/irondict.svg` used on the
+desktop.
+

@@ -49,7 +49,14 @@ pub fn parse_hex(s: &str) -> Option<(u8, u8, u8)> {
 }
 
 fn detect_accent() -> (u8, u8, u8) {
-    portal_accent().or_else(gsettings_accent).unwrap_or(INDIGO)
+    #[cfg(not(target_os = "android"))]
+    {
+        portal_accent().or_else(gsettings_accent).unwrap_or(INDIGO)
+    }
+    #[cfg(target_os = "android")]
+    {
+        INDIGO
+    }
 }
 
 /// Whether the desktop prefers a dark color scheme (defaults to light).
@@ -58,13 +65,24 @@ fn detect_accent() -> (u8, u8, u8) {
 /// light), which is handy for testing on desktops that don't report a
 /// preference.
 fn detect_dark() -> bool {
-    if let Ok(v) = std::env::var("IRONDICT_DARK") {
-        return matches!(v.to_lowercase().as_str(), "1" | "true" | "dark" | "yes");
+    #[cfg(not(target_os = "android"))]
+    {
+        if let Ok(v) = std::env::var("IRONDICT_DARK") {
+            return matches!(v.to_lowercase().as_str(), "1" | "true" | "dark" | "yes");
+        }
+        portal_dark().or_else(gsettings_dark).unwrap_or(false)
     }
-    portal_dark().or_else(gsettings_dark).unwrap_or(false)
+    #[cfg(target_os = "android")]
+    {
+        // The Android backend reports the system scheme through Slint's built-in
+        // `Palette.color-scheme`; `app.slint` follows it via `follow-system`, so
+        // the value here is unused.
+        false
+    }
 }
 
 /// XDG desktop portal: `org.freedesktop.appearance` / `accent-color` → `(ddd)`.
+#[cfg(not(target_os = "android"))]
 fn portal_accent() -> Option<(u8, u8, u8)> {
     let conn = zbus::blocking::Connection::session().ok()?;
     let reply = conn
@@ -81,6 +99,7 @@ fn portal_accent() -> Option<(u8, u8, u8)> {
 }
 
 /// Recursively unwrap variant layers to a struct of three doubles in `[0, 1]`.
+#[cfg(not(target_os = "android"))]
 fn extract_rgb(v: &zbus::zvariant::Value) -> Option<(u8, u8, u8)> {
     use zbus::zvariant::Value;
     match v {
@@ -108,6 +127,7 @@ fn extract_rgb(v: &zbus::zvariant::Value) -> Option<(u8, u8, u8)> {
 }
 
 /// GNOME fallback: `gsettings get org.gnome.desktop.interface accent-color`.
+#[cfg(not(target_os = "android"))]
 fn gsettings_accent() -> Option<(u8, u8, u8)> {
     let out = std::process::Command::new("gsettings")
         .args(["get", "org.gnome.desktop.interface", "accent-color"])
@@ -122,6 +142,7 @@ fn gsettings_accent() -> Option<(u8, u8, u8)> {
 
 /// XDG desktop portal: `org.freedesktop.appearance` / `color-scheme` → `u`,
 /// where `1` means "prefer dark" (`0` = no preference, `2` = prefer light).
+#[cfg(not(target_os = "android"))]
 fn portal_dark() -> Option<bool> {
     let conn = zbus::blocking::Connection::session().ok()?;
     let reply = conn
@@ -138,6 +159,7 @@ fn portal_dark() -> Option<bool> {
 }
 
 /// Recursively unwrap variant layers to a `u32`.
+#[cfg(not(target_os = "android"))]
 fn extract_u32(v: &zbus::zvariant::Value) -> Option<u32> {
     use zbus::zvariant::Value;
     match v {
@@ -149,6 +171,7 @@ fn extract_u32(v: &zbus::zvariant::Value) -> Option<u32> {
 
 /// GNOME fallback: `gsettings get org.gnome.desktop.interface color-scheme`,
 /// which is one of `'default'`, `'prefer-dark'`, `'prefer-light'`.
+#[cfg(not(target_os = "android"))]
 fn gsettings_dark() -> Option<bool> {
     let out = std::process::Command::new("gsettings")
         .args(["get", "org.gnome.desktop.interface", "color-scheme"])
@@ -162,6 +185,7 @@ fn gsettings_dark() -> Option<bool> {
 }
 
 /// The GNOME 47 named accent palette.
+#[cfg(not(target_os = "android"))]
 fn named_accent(name: &str) -> Option<(u8, u8, u8)> {
     Some(match name {
         "blue" => (0x35, 0x84, 0xe4),

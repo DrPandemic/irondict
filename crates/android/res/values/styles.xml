@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 15+ forces edge-to-edge for apps targeting SDK 35, so the
+         window is drawn behind the status bar. Force dark system-bar icons so
+         the clock and status icons stay readable on our light UI. -->
+    <style name="IronDictTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>

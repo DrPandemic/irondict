@@ -9,8 +9,6 @@ use irondict_core::{
     DictionaryManager, Language, Progress, SearchEngine, SearchMode,
 };
 
-mod gui;
-
 /// Multi-dictionary lookup over StarDict dictionaries.
 ///
 /// Run a subcommand for the command-line front-end, or pass `--gui` to launch
@@ -145,7 +143,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.gui {
-        return gui::run(cli.word, cli.dict, cli.autotype)
+        return irondict::gui::run(cli.word, cli.dict, cli.autotype)
             .map_err(|e| anyhow::anyhow!("running GUI: {e}"));
     }
 
@@ -345,7 +343,8 @@ fn run_search(
             hit.headword, hit.dictionary, hit.score
         );
         if with_snippet {
-            let snippet = gui::fetch_snippet(&mut manager, &hit.dictionary, &hit.headword);
+            let snippet =
+                irondict::gui::fetch_snippet(&mut manager, &hit.dictionary, &hit.headword);
             line.push('\t');
             line.push_str(&snippet);
         }

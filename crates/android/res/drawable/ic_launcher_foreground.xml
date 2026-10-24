@@ -1,0 +1,45 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!--
+      Open book, same artwork as crates/app/assets/icons/irondict.svg. The paths
+      keep their 512-unit coordinates and the group scales the whole 512 canvas
+      down to the 108x108 adaptive-icon foreground. The book then spans roughly
+      64/108, safely inside the 72/108 guaranteed-visible zone.
+    -->
+    <!-- Full-bleed tile colour. Some launchers tint or override the adaptive
+         icon's <background> layer; drawing the tile here keeps the indigo
+         square regardless. -->
+    <path android:fillColor="#FF4F46E5" android:pathData="M0,0 h108 v108 h-108 z" />
+    <!-- Book scaled to ~48dp in the 108dp canvas (was ~68dp, which the launcher
+         cropped at the circular mask). Kept inside the safe zone with padding. -->
+    <group android:translateX="15.6" android:translateY="15.45" android:scaleX="0.15" android:scaleY="0.15">
+        <!-- left page -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M256,150 C214,124 158,116 110,122 C102,123 96,130 96,138 L96,360 C96,369 104,375 113,373 C157,367 212,374 256,398 Z" />
+        <!-- right page -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M256,150 C298,124 354,116 402,122 C410,123 416,130 416,138 L416,360 C416,369 408,375 399,373 C355,367 300,374 256,398 Z" />
+        <!-- spine -->
+        <path
+            android:strokeColor="#4F46E5"
+            android:strokeWidth="6"
+            android:strokeAlpha="0.55"
+            android:strokeLineCap="round"
+            android:pathData="M256,158 L256,392" />
+        <!-- ruling, left page -->
+        <path android:strokeColor="#4F46E5" android:strokeWidth="11" android:strokeAlpha="0.85" android:strokeLineCap="round" android:pathData="M132,178 L226,194" />
+        <path android:strokeColor="#4F46E5" android:strokeWidth="11" android:strokeAlpha="0.85" android:strokeLineCap="round" android:pathData="M132,218 L226,234" />
+        <path android:strokeColor="#4F46E5" android:strokeWidth="11" android:strokeAlpha="0.85" android:strokeLineCap="round" android:pathData="M132,258 L226,274" />
+        <path android:strokeColor="#4F46E5" android:strokeWidth="11" android:strokeAlpha="0.85" android:strokeLineCap="round" android:pathData="M132,298 L200,310" />
+        <!-- ruling, right page -->
+        <path android:strokeColor="#4F46E5" android:strokeWidth="11" android:strokeAlpha="0.85" android:strokeLineCap="round" android:pathData="M286,194 L380,178" />
+        <path android:strokeColor="#4F46E5" android:strokeWidth="11" android:strokeAlpha="0.85" android:strokeLineCap="round" android:pathData="M286,234 L380,218" />
+        <path android:strokeColor="#4F46E5" android:strokeWidth="11" android:strokeAlpha="0.85" android:strokeLineCap="round" android:pathData="M286,274 L380,258" />
+        <path android:strokeColor="#4F46E5" android:strokeWidth="11" android:strokeAlpha="0.85" android:strokeLineCap="round" android:pathData="M312,310 L380,298" />
+    </group>
+</vector>

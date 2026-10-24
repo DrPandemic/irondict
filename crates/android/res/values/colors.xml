@@ -1,0 +1,4 @@
+<resources>
+    <!-- Matches the tile / GUI fallback accent colour (#4F46E5). -->
+    <color name="ic_launcher_background">#4F46E5</color>
+</resources>

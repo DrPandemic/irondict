@@ -1,0 +1,39 @@
+[package]
+name = "irondict-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+irondict = { path = "../app" }
+irondict-core = { path = "../core" }
+# The Android backend is enabled here only; feature unification turns it on for
+# the `slint` used by the `irondict` crate in Android builds.
+slint = { version = "1", features = ["backend-android-activity-06"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+log = "0.4"
+android_logger = "0.15"
+
+[package.metadata.android]
+package = "org.imateapot.irondict"
+# version_code / version_name are derived from the workspace package version.
+# x86_64 is for the emulator; drop it for a release APK.
+build_targets = ["aarch64-linux-android", "x86_64-linux-android"]
+assets = "../core/assets"
+resources = "res"
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 35
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
+
+[package.metadata.android.application]
+label = "IronDict"
+icon = "@mipmap/ic_launcher"
+theme = "@style/IronDictTheme"

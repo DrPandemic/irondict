@@ -2,11 +2,15 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use stardict::dict::Dict;
-use stardict::Ifo;
+use stardict::idx::IdxEntry;
+use stardict::ifo::Ifo;
 
-use crate::idx::Index;
+use crate::bundled;
+use crate::dict::DictReader;
+use crate::idx::{decode, Index};
 use crate::model::{DefinitionSegment, Dictionary, DictionaryInfo, Entry, SharedDict};
+use crate::source::DictSource;
+use crate::Error;
 
 fn to_entry(word: stardict::WordDefinition) -> Entry {
     Entry {
@@ -22,13 +26,53 @@ fn to_entry(word: stardict::WordDefinition) -> Entry {
     }
 }
 
+/// Decode one `.dict` block exactly like the `stardict` crate's `parse_data`:
+/// when the `.ifo` declares a `sametypesequence` the whole block is text of
+/// those types; otherwise the first byte is the type and the rest is text. Kept
+/// byte-identical to the previous implementation (same lossy UTF-8 decode).
+fn parse_data(data: &[u8], types: &str) -> Option<(String, String)> {
+    let (types, text) = if types.is_empty() {
+        if data.len() < 2 {
+            return None;
+        }
+        let mut types = String::new();
+        types.push(data[0] as char);
+        (types, decode(&data[1..]))
+    } else {
+        (types.to_owned(), decode(data))
+    };
+    Some((types, text))
+}
+
+/// Materialize one index entry's definition by reading each of its `.dict`
+/// blocks. Mirrors `stardict::dict::Dict::get_definition`.
+fn get_definition(
+    dict: &mut DictReader,
+    ifo: &Ifo,
+    idx: &IdxEntry,
+) -> Result<Option<stardict::WordDefinition>, Error> {
+    let mut segments = Vec::new();
+    for block in &idx.blocks {
+        if let Some(data) = dict.block(block.offset, block.size)? {
+            if let Some((types, text)) = parse_data(&data, &ifo.sametypesequence) {
+                segments.push(stardict::WordDefinitionSegment { types, text });
+            }
+        }
+    }
+    if segments.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(stardict::WordDefinition {
+            word: idx.word.clone(),
+            segments,
+        }))
+    }
+}
+
 /// Locate a StarDict sub-file alongside `prefix` (the `.ifo` path with its
 /// extension stripped), preferring the plain form and falling back to the
 /// compressed one (`.idx` then `.idx.gz`, `.dict` then `.dict.dz`). Returns the
-/// path and whether it is the compressed variant. This mirrors the resolution
-/// the `stardict` crate does inside its own loader; we replicate it here so we
-/// can build the index and the `.dict` reader separately — the index can then be
-/// shared across handles (see [`SharedDict`]) instead of reparsed per handle.
+/// path and whether it is the compressed variant.
 fn sub_file(prefix: &str, name: &str, compressed: &str) -> Result<(PathBuf, bool), crate::Error> {
     let plain = PathBuf::from(format!("{prefix}.{name}"));
     if plain.is_file() {
@@ -44,7 +88,57 @@ fn sub_file(prefix: &str, name: &str, compressed: &str) -> Result<(PathBuf, bool
     )))
 }
 
+/// Load a dictionary from its four/five sources. Shared by the filesystem and
+/// bundled paths.
+fn load_sources(
+    ifo_source: &DictSource,
+    idx_source: DictSource,
+    idx_gz: bool,
+    dict_source: DictSource,
+    dict_gz: bool,
+    syn_source: Option<DictSource>,
+) -> Result<Dictionary, crate::Error> {
+    let ifo_bytes = ifo_source.open()?;
+    let ifo = crate::ifo_bytes::parse_ifo(ifo_bytes.as_slice())?;
+    // Parse the `.idx` (headword → blocks) eagerly; this is needed for every
+    // lookup and is cheap. The `.syn` is only mapped, not parsed — it is
+    // binary-searched on demand (see [`crate::idx`]). Shared via the returned
+    // `Arc`.
+    let idx = Index::from_source(&idx_source, &ifo, idx_gz, syn_source.as_ref())?;
+    let dict_data = Arc::new(dict_source.open()?);
+    let dict = DictReader::new_shared(Arc::clone(&dict_data), dict_gz)?;
+
+    let info = DictionaryInfo {
+        name: ifo.bookname.clone(),
+        word_count: ifo.wordcount,
+    };
+    Ok(Dictionary {
+        info,
+        shared: Arc::new(SharedDict {
+            ifo,
+            idx,
+            dict_data,
+            dict_gz,
+        }),
+        dict,
+    })
+}
+
+/// Load a dictionary. `path` is its `.ifo` file on the filesystem, or a virtual
+/// `.ifo` path previously registered as a bundled dictionary
+/// (see [`crate::bundled`]).
 pub fn load(path: &Path) -> Result<Dictionary, crate::Error> {
+    if let Some(files) = bundled::get(path) {
+        return load_sources(
+            &files.ifo,
+            files.idx,
+            files.idx_gz,
+            files.dict,
+            files.dict_gz,
+            files.syn,
+        );
+    }
+
     let prefix = path
         .to_str()
         .and_then(|s| s.strip_suffix(".ifo"))
@@ -56,33 +150,18 @@ pub fn load(path: &Path) -> Result<Dictionary, crate::Error> {
         })?;
 
     let (idx_path, idx_gz) = sub_file(prefix, "idx", "gz")?;
-    let (dict_path, dict_bz) = sub_file(prefix, "dict", "dz")?;
+    let (dict_path, dict_gz) = sub_file(prefix, "dict", "dz")?;
     let syn_path = PathBuf::from(format!("{prefix}.syn"));
     let syn = syn_path.is_file().then_some(syn_path);
 
-    let ifo = Ifo::new(path.to_path_buf()).map_err(|e| crate::Error::Stardict(e.into()))?;
-    // Parse the `.idx` (headword → blocks) eagerly; this is needed for every
-    // lookup and is cheap. The `.syn` is only memory-mapped here, not parsed —
-    // it is binary-searched on demand (see [`crate::idx`]), so a large synonym
-    // file no longer costs ~1s of startup. Shared via the returned `Arc`.
-    let idx = Index::new(&idx_path, &ifo, idx_gz, syn.as_deref())?;
-    let dict =
-        Dict::new(dict_path.clone(), dict_bz).map_err(|e| crate::Error::Stardict(e.into()))?;
-
-    let info = DictionaryInfo {
-        name: ifo.bookname.clone(),
-        word_count: ifo.wordcount,
-    };
-    Ok(Dictionary {
-        info,
-        shared: Arc::new(SharedDict {
-            ifo,
-            idx,
-            dict_path,
-            dict_bz,
-        }),
-        dict,
-    })
+    load_sources(
+        &DictSource::path(path),
+        DictSource::path(idx_path),
+        idx_gz,
+        DictSource::path(dict_path),
+        dict_gz,
+        syn.map(DictSource::path),
+    )
 }
 
 impl Dictionary {
@@ -91,15 +170,12 @@ impl Dictionary {
             return Ok(None);
         };
         // Disjoint borrows: the index/`.ifo` are read from the shared (immutable)
-        // part while the `.dict` reader is seeked mutably.
+        // part while the `.dict` reader is used mutably.
         let ifo = &self.shared.ifo;
         let dict = &mut self.dict;
         let mut defs = Vec::with_capacity(blocks.len());
         for block in &blocks {
-            if let Some(word) = dict
-                .get_definition(block, ifo)
-                .map_err(|e| crate::Error::Stardict(e.into()))?
-            {
+            if let Some(word) = get_definition(dict, ifo, block)? {
                 defs.push(to_entry(word));
             }
         }
@@ -133,20 +209,18 @@ impl Dictionary {
         let idx = &self.shared.idx;
         let dict = &mut self.dict;
         let mut error = None;
-        idx.for_each_word(|idx_entry| {
-            match dict.get_definition(&idx_entry, ifo) {
-                Ok(Some(word)) => {
-                    if f(to_entry(word)).is_break() {
-                        return ControlFlow::Break(());
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    error = Some(crate::Error::Stardict(e.into()));
+        idx.for_each_word(|idx_entry| match get_definition(dict, ifo, &idx_entry) {
+            Ok(Some(word)) => {
+                if f(to_entry(word)).is_break() {
                     return ControlFlow::Break(());
                 }
+                ControlFlow::Continue(())
             }
-            ControlFlow::Continue(())
+            Ok(None) => ControlFlow::Continue(()),
+            Err(e) => {
+                error = Some(e);
+                ControlFlow::Break(())
+            }
         });
         match error {
             Some(e) => Err(e),
