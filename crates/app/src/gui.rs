@@ -193,6 +193,24 @@ struct RenderedResults {
     page: RenderedPage,
 }
 
+/// A scope tab's word of the moment for the narrow home swipe, rendered ahead
+/// on the worker for a tab not visited yet, so a swipe can show it beside the
+/// current page and then switch to it without recomputing anything. `word` is
+/// the headword history records.
+struct Neighbor {
+    scope: i32,
+    word: String,
+    page: RenderedPage,
+}
+
+/// One side of a `WorkerReq::Neighbors`: the scope and the word of the moment
+/// (headword, source dictionary) to render for it.
+struct NeighborReq {
+    scope: i32,
+    word: String,
+    src: Option<String>,
+}
+
 /// A request from the UI thread to the search worker.
 enum WorkerReq {
     /// Run `query` (scoped to `scope` when set); `gen` lets the UI drop stale
@@ -212,6 +230,9 @@ enum WorkerReq {
     /// hits a cold OS page cache at startup and would otherwise stall the UI
     /// thread for ~100 ms while the user is already typing.
     CacheNextWotm { scope: i32 },
+    /// Render the word-of-the-moment pages of unvisited scope tabs beside the
+    /// current one, for the narrow home swipe.
+    Neighbors { gen: u64, sides: Vec<NeighborReq> },
     /// Stop the worker (on shutdown).
     Shutdown,
 }
@@ -233,6 +254,11 @@ enum WorkerMsg {
     /// the next launch can show it before the dictionaries finish loading.
     WotmCached {
         page: Box<RenderedPage>,
+    },
+    /// The pages requested by `WorkerReq::Neighbors`.
+    Neighbors {
+        gen: u64,
+        neighbors: Vec<Neighbor>,
     },
     /// A search arrived before the index was ready.
     NoEngine {
@@ -306,6 +332,230 @@ impl NavHistory {
 
 /// Load the manager from the persisted config, seeding bundled GCIDE on first
 /// run (mirrors the CLI). Per-dictionary load failures are warnings, not fatal.
+/// What a scope tab last showed in narrow mode, captured from the UI when
+/// switching away so switching back restores it exactly: the search (query,
+/// results, selection), whether the definition or the list was showing, and
+/// the definition page.
+struct TabState {
+    query: SharedString,
+    searching: bool,
+    results: Vec<ResultItem>,
+    rows: Vec<RowData>,
+    selected: i32,
+    narrow_def: bool,
+    section_label: SharedString,
+    headword: SharedString,
+    pron: SharedString,
+    etym: SharedString,
+    source: SharedString,
+    conj_label: SharedString,
+    blocks: Vec<DefBlock>,
+    conjugation: ModelRc<ConjMood>,
+}
+
+/// Capture the current tab's state from the UI (taking the result rows).
+fn snapshot_tab(
+    ui: &AppWindow,
+    results_model: &Rc<VecModel<ResultItem>>,
+    blocks_model: &Rc<VecModel<DefBlock>>,
+    rows: &Rc<RefCell<Vec<RowData>>>,
+) -> TabState {
+    TabState {
+        query: ui.get_query(),
+        searching: ui.get_searching(),
+        results: results_model.iter().collect(),
+        rows: std::mem::take(&mut *rows.borrow_mut()),
+        selected: ui.get_selected_index(),
+        narrow_def: ui.get_narrow_def(),
+        section_label: ui.get_section_label(),
+        headword: ui.get_def_headword(),
+        pron: ui.get_def_pron(),
+        etym: ui.get_def_etym(),
+        source: ui.get_def_source(),
+        conj_label: ui.get_conj_label(),
+        blocks: blocks_model.iter().collect(),
+        conjugation: ui.get_conjugation(),
+    }
+}
+
+/// Put a captured tab state back on screen.
+fn restore_tab(
+    ui: &AppWindow,
+    results_model: &Rc<VecModel<ResultItem>>,
+    blocks_model: &Rc<VecModel<DefBlock>>,
+    rows: &Rc<RefCell<Vec<RowData>>>,
+    tab: TabState,
+) {
+    ui.set_query(tab.query);
+    ui.set_searching(tab.searching);
+    results_model.set_vec(tab.results);
+    *rows.borrow_mut() = tab.rows;
+    ui.set_selected_index(tab.selected);
+    ui.set_narrow_def(tab.narrow_def);
+    ui.set_section_label(tab.section_label);
+    ui.set_def_headword(tab.headword);
+    ui.set_def_pron(tab.pron);
+    ui.set_def_etym(tab.etym);
+    ui.set_def_source(tab.source);
+    ui.set_conj_label(tab.conj_label);
+    blocks_model.set_vec(tab.blocks);
+    ui.set_conjugation(tab.conjugation);
+    ui.set_conj_tab(0);
+    ui.set_show_conjugation(false);
+    ui.set_def_scroll_y(0.0);
+}
+
+/// The UI view of a tab state, for a neighbour in the home swipe.
+fn tab_view(tab: &TabState, scope: i32) -> PageView {
+    let list = tab.searching && !tab.narrow_def;
+    PageView {
+        valid: true,
+        list,
+        results: if list {
+            ModelRc::from(Rc::new(VecModel::from(tab.results.clone())))
+        } else {
+            ModelRc::default()
+        },
+        all_scope: scope == 0,
+        label: tab.section_label.clone(),
+        headword: tab.headword.clone(),
+        pron: tab.pron.clone(),
+        etym: tab.etym.clone(),
+        source: tab.source.clone(),
+        conj_label: tab.conj_label.clone(),
+        blocks: ModelRc::from(Rc::new(VecModel::from(tab.blocks.clone()))),
+    }
+}
+
+/// What the narrow home swipe's neighbour pages are built for: the current
+/// scope, the number of enabled dictionaries, and an epoch bumped whenever the
+/// dictionaries or the index change underneath.
+#[derive(Clone, PartialEq)]
+struct NeighborKey {
+    scope: i32,
+    count: usize,
+    epoch: u64,
+}
+
+#[derive(Default)]
+struct NeighborState {
+    /// The key of the latest neighbours (`None`: not in narrow mode).
+    key: Option<NeighborKey>,
+    /// Tags worker requests so replies for a superseded key are dropped.
+    gen: u64,
+    epoch: u64,
+    /// Rendered words of the moment for unvisited neighbour tabs of `key`.
+    ready: Vec<Neighbor>,
+    /// Whether the UI currently shows any neighbour page.
+    shown: bool,
+    /// The saved state of every visited tab other than the current one.
+    tabs: HashMap<i32, TabState>,
+}
+
+impl NeighborState {
+    /// Take the pre-rendered word of the moment for `scope`, if it was rendered
+    /// beside tab `from`.
+    fn take(&mut self, from: i32, scope: i32) -> Option<Neighbor> {
+        if self.key.as_ref()?.scope != from {
+            return None;
+        }
+        let i = self.ready.iter().position(|n| n.scope == scope)?;
+        Some(self.ready.swap_remove(i))
+    }
+
+    /// Forget everything when the dictionaries or index change (scope indexes
+    /// may now mean different dictionaries).
+    fn reset(&mut self) {
+        self.epoch += 1;
+        self.tabs.clear();
+    }
+}
+
+type Neighbors = Rc<RefCell<NeighborState>>;
+
+/// Keep the narrow home swipe's neighbour pages in step with the current tab:
+/// whenever the tab, dictionary set or layout changes, show each neighbour
+/// tab's saved state, or have the worker render the word of the moment of one
+/// not visited yet. Polled from the worker-response timer.
+fn sync_neighbors(
+    ui: &AppWindow,
+    manager: &Rc<RefCell<DictionaryManager>>,
+    session_wotm: &SessionWotm,
+    seed: usize,
+    req_tx: &mpsc::Sender<WorkerReq>,
+    neighbors: &Neighbors,
+) {
+    let mut nb = neighbors.borrow_mut();
+    let want = ui.get_narrow().then(|| NeighborKey {
+        scope: ui.get_scope(),
+        count: enabled_count(manager),
+        epoch: nb.epoch,
+    });
+    if want == nb.key {
+        return;
+    }
+    nb.key = want;
+    nb.gen += 1;
+    nb.ready.clear();
+    ui.set_prev_page(PageView::default());
+    ui.set_next_page(PageView::default());
+    nb.shown = false;
+    let Some(key) = nb.key.clone() else {
+        return;
+    };
+    let mut sides = Vec::new();
+    for s in [key.scope - 1, key.scope + 1] {
+        if s < 0 || s as usize > key.count {
+            continue;
+        }
+        match nb.tabs.get(&s) {
+            Some(tab) => {
+                let view = tab_view(tab, s);
+                if s < key.scope {
+                    ui.set_prev_page(view);
+                } else {
+                    ui.set_next_page(view);
+                }
+                nb.shown = true;
+            }
+            None => {
+                let (word, src) = session_word(session_wotm, manager, s, seed);
+                sides.push(NeighborReq { scope: s, word, src });
+            }
+        }
+    }
+    if !sides.is_empty() {
+        let _ = req_tx.send(WorkerReq::Neighbors { gen: nb.gen, sides });
+    }
+}
+
+/// The UI view of a pre-rendered neighbour word of the moment.
+fn page_view(n: &Neighbor) -> PageView {
+    let page = &n.page;
+    let (pron, etym, conj_label) = match &page.body {
+        PageBody::Entry {
+            pron,
+            etym,
+            conj_label,
+            ..
+        } => (pron.as_str(), etym.as_str(), conj_label.as_str()),
+        PageBody::Message { .. } => ("", "", ""),
+    };
+    PageView {
+        valid: true,
+        list: false,
+        results: ModelRc::default(),
+        all_scope: n.scope == 0,
+        label: page.section_label.as_str().into(),
+        headword: page.headword.as_str().into(),
+        pron: pron.into(),
+        etym: etym.into(),
+        source: page.source.as_str().into(),
+        conj_label: conj_label.into(),
+        blocks: ModelRc::from(Rc::new(VecModel::from(def_blocks(page)))),
+    }
+}
+
 fn load_manager() -> DictionaryManager {
     let config = match Config::default_path() {
         Ok(path) => {
@@ -447,6 +697,32 @@ fn run_worker(req_rx: mpsc::Receiver<WorkerReq>, resp_tx: mpsc::Sender<WorkerMsg
                 let _ = resp_tx.send(WorkerMsg::WotmCached {
                     page: Box::new(page),
                 });
+            }
+            WorkerReq::Neighbors { gen, sides } => {
+                // Neighbours are a nicety: if the user has already switched
+                // tabs again, skip straight to the newer request.
+                match req_rx.try_recv() {
+                    Ok(next @ WorkerReq::Neighbors { .. }) => {
+                        pending = Some(next);
+                        continue;
+                    }
+                    Ok(other) => pending = Some(other),
+                    Err(_) => {}
+                }
+                let neighbors = sides
+                    .into_iter()
+                    .map(|side| Neighbor {
+                        scope: side.scope,
+                        page: compute_page(
+                            &mut manager,
+                            &side.word,
+                            "WORD OF THE MOMENT",
+                            side.src.as_deref(),
+                        ),
+                        word: side.word,
+                    })
+                    .collect();
+                let _ = resp_tx.send(WorkerMsg::Neighbors { gen, neighbors });
             }
             WorkerReq::Shutdown => break,
         }
@@ -623,6 +899,8 @@ pub fn run(
     // match the worker's initial build.
     let build_gen = Rc::new(Cell::new(0u64));
     std::thread::spawn(move || run_worker(req_rx, resp_tx));
+    // The narrow home swipe's pre-rendered neighbour pages.
+    let neighbors: Neighbors = Rc::new(RefCell::new(NeighborState::default()));
 
     // Drain the worker's responses and apply them to the UI. Polls often enough
     // that results land within a frame or two of the worker finishing.
@@ -640,6 +918,7 @@ pub fn run(
         let dict_items = dict_items.clone();
         let scopes = scopes.clone();
         let session_wotm = session_wotm.clone();
+        let neighbors = neighbors.clone();
         // When the current index build began, so the time-remaining estimate can
         // extrapolate from the elapsed time. `None` between builds.
         let mut build_start: Option<Instant> = None;
@@ -651,6 +930,7 @@ pub fn run(
                         // The background load finished: adopt the real dictionary
                         // set and populate the UI (lists, scope, first page).
                         *manager.borrow_mut() = *loaded;
+                        neighbors.borrow_mut().reset();
                         apply_loaded_manager(
                             &ui,
                             &manager,
@@ -676,6 +956,27 @@ pub fn run(
                                 *results,
                             );
                         }
+                    }
+                    WorkerMsg::Neighbors {
+                        gen: g,
+                        neighbors: list,
+                    } => {
+                        let mut nb = neighbors.borrow_mut();
+                        let Some(scope) = nb.key.as_ref().map(|k| k.scope) else {
+                            continue;
+                        };
+                        if g != nb.gen {
+                            continue;
+                        }
+                        for n in &list {
+                            if n.scope < scope {
+                                ui.set_prev_page(page_view(n));
+                            } else {
+                                ui.set_next_page(page_view(n));
+                            }
+                        }
+                        nb.shown |= !list.is_empty();
+                        nb.ready = list;
                     }
                     WorkerMsg::NoEngine { gen: g } => {
                         if g == gen.get() {
@@ -718,6 +1019,7 @@ pub fn run(
                         build_start = None;
                         ui.set_indexing(false);
                         ui.set_index_progress(1.0);
+                        neighbors.borrow_mut().reset();
                         // Run whatever the user has already typed against the new index.
                         let q = ui.get_query();
                         if !q.trim().is_empty() {
@@ -751,6 +1053,9 @@ pub fn run(
                         save_cached_wotm(&page);
                     }
                 }
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                sync_neighbors(&ui, &manager, &session_wotm, seed, &req_tx, &neighbors);
             }
         });
     }
@@ -800,11 +1105,17 @@ pub fn run(
             let manager = manager.clone();
             let req_tx = req_tx.clone();
             let gen = gen.clone();
+            let typed_in = ui_weak.unwrap().get_scope();
             debounce.start(
                 TimerMode::SingleShot,
                 Duration::from_millis(110),
                 move || {
                     let ui = ui_weak.unwrap();
+                    // The tab was switched meanwhile (restoring its own search);
+                    // a desktop scope change re-runs the query itself.
+                    if ui.get_scope() != typed_in {
+                        return;
+                    }
                     gen.set(gen.get() + 1);
                     let scope = scope_filter(ui.get_scope(), &manager);
                     let _ = req_tx.send(WorkerReq::Search {
@@ -928,6 +1239,73 @@ pub fn run(
             }
             // Keep the next-launch word aligned with the now-selected dictionary,
             // which is also what the next launch will restore as its scope.
+            cache_next_wotm(&manager, idx);
+        });
+    }
+
+    // Narrow mode: the scopes are tabs. Switching saves the current tab's state
+    // and restores the target's (or shows its word of the moment the first
+    // time, using the page the home swipe already rendered beside this one).
+    {
+        let ui_weak = ui.as_weak();
+        let manager = manager.clone();
+        let results_model = results_model.clone();
+        let blocks_model = blocks_model.clone();
+        let rows = rows.clone();
+        let history = history.clone();
+        let gen = gen.clone();
+        let session_wotm = session_wotm.clone();
+        let neighbors = neighbors.clone();
+        ui.on_switch_tab(move |idx| {
+            let ui = ui_weak.unwrap();
+            let from = ui.get_scope();
+            if idx < 0 || idx as usize > enabled_count(&manager) || idx == from {
+                return;
+            }
+            let (saved, wotm) = {
+                let mut nb = neighbors.borrow_mut();
+                let wotm = nb.take(from, idx);
+                let tab = snapshot_tab(&ui, &results_model, &blocks_model, &rows);
+                nb.tabs.insert(from, tab);
+                (nb.tabs.remove(&idx), wotm)
+            };
+            ui.set_scope(idx);
+            manager.borrow_mut().preferences_mut().last_scope = scope_filter(idx, &manager);
+            save_config(&manager);
+            // Drop any in-flight search: it belongs to the tab just left.
+            gen.set(gen.get() + 1);
+            match saved {
+                Some(tab) => restore_tab(&ui, &results_model, &blocks_model, &rows, tab),
+                None => {
+                    ui.set_query("".into());
+                    ui.set_searching(false);
+                    results_model.set_vec(Vec::new());
+                    ui.set_selected_index(-1);
+                    ui.set_narrow_def(true);
+                    match wotm {
+                        Some(n) => show_page(
+                            &ui,
+                            &blocks_model,
+                            &history,
+                            &n.page,
+                            &n.word,
+                            "WORD OF THE MOMENT",
+                        ),
+                        None => {
+                            let (word, src) = session_word(&session_wotm, &manager, idx, seed);
+                            navigate(
+                                &ui,
+                                &manager,
+                                &blocks_model,
+                                &history,
+                                &word,
+                                "WORD OF THE MOMENT",
+                                src.as_deref(),
+                            );
+                        }
+                    }
+                }
+            }
             cache_next_wotm(&manager, idx);
         });
     }
@@ -2212,49 +2590,55 @@ fn apply_page(ui: &AppWindow, blocks_model: &Rc<VecModel<DefBlock>>, page: &Rend
     ui.set_section_label(page.section_label.as_str().into());
     ui.set_def_headword(page.headword.as_str().into());
     ui.set_def_source(page.source.as_str().into());
+    blocks_model.set_vec(def_blocks(page));
     match &page.body {
-        PageBody::Message { body } => {
+        PageBody::Message { .. } => {
             ui.set_def_pron("".into());
             ui.set_def_etym("".into());
-            blocks_model.set_vec(vec![DefBlock {
-                marker: "".into(),
-                text: body.as_str().into(),
-                styled: Default::default(),
-                quote: false,
-                heading: false,
-                indent: 0,
-                conj: false,
-            }]);
             clear_conjugation(ui);
         }
         PageBody::Entry {
             pron,
             etym,
-            blocks,
             conjugation,
             conj_label,
+            ..
         } => {
             ui.set_def_pron(pron.as_str().into());
             ui.set_def_etym(etym.as_str().into());
-            let blocks: Vec<DefBlock> = blocks
-                .iter()
-                .map(|b| DefBlock {
-                    marker: b.marker.as_str().into(),
-                    text: b.text.as_str().into(),
-                    styled: b
-                        .styled
-                        .clone()
-                        .unwrap_or_else(|| parse_markdown::<StyledText>(&b.md, &[])),
-                    quote: b.quote,
-                    heading: b.heading,
-                    indent: b.indent,
-                    conj: b.conj,
-                })
-                .collect();
-            blocks_model.set_vec(blocks);
             ui.set_conj_label(conj_label.as_str().into());
             apply_conjugation(ui, conjugation);
         }
+    }
+}
+
+/// A page's definition body as UI blocks (a message is one plain block).
+fn def_blocks(page: &RenderedPage) -> Vec<DefBlock> {
+    match &page.body {
+        PageBody::Message { body } => vec![DefBlock {
+            marker: "".into(),
+            text: body.as_str().into(),
+            styled: Default::default(),
+            quote: false,
+            heading: false,
+            indent: 0,
+            conj: false,
+        }],
+        PageBody::Entry { blocks, .. } => blocks
+            .iter()
+            .map(|b| DefBlock {
+                marker: b.marker.as_str().into(),
+                text: b.text.as_str().into(),
+                styled: b
+                    .styled
+                    .clone()
+                    .unwrap_or_else(|| parse_markdown::<StyledText>(&b.md, &[])),
+                quote: b.quote,
+                heading: b.heading,
+                indent: b.indent,
+                conj: b.conj,
+            })
+            .collect(),
     }
 }
 
@@ -2408,15 +2792,7 @@ fn apply_results(
     history: &Rc<RefCell<NavHistory>>,
     results: RenderedResults,
 ) {
-    let items: Vec<ResultItem> = results
-        .items
-        .iter()
-        .map(|i| ResultItem {
-            headword: i.headword.as_str().into(),
-            snippet: i.snippet.as_str().into(),
-            source: i.source.as_str().into(),
-        })
-        .collect();
+    let items = result_items(&results);
     *rows.borrow_mut() = results
         .items
         .iter()
@@ -2441,6 +2817,19 @@ fn apply_results(
     }
 }
 
+/// The result list rows of a search outcome.
+fn result_items(results: &RenderedResults) -> Vec<ResultItem> {
+    results
+        .items
+        .iter()
+        .map(|i| ResultItem {
+            headword: i.headword.as_str().into(),
+            snippet: i.snippet.as_str().into(),
+            source: i.source.as_str().into(),
+        })
+        .collect()
+}
+
 /// Render `headword` (on the UI thread, via the UI's own manager) and record it
 /// in the navigation history, so it can be revisited with back/forward. Used for
 /// synchronous user actions (clicks, links, word of the moment).
@@ -2454,7 +2843,19 @@ fn navigate(
     filter: Option<&str>,
 ) {
     let page = compute_page(&mut manager.borrow_mut(), headword, label, filter);
-    apply_page(ui, blocks_model, &page);
+    show_page(ui, blocks_model, history, &page, headword, label);
+}
+
+/// Show an already-rendered page for `headword` and record it in the history.
+fn show_page(
+    ui: &AppWindow,
+    blocks_model: &Rc<VecModel<DefBlock>>,
+    history: &Rc<RefCell<NavHistory>>,
+    page: &RenderedPage,
+    headword: &str,
+    label: &str,
+) {
+    apply_page(ui, blocks_model, page);
     history.borrow_mut().push(NavEntry {
         headword: headword.to_string(),
         label: label.to_string(),
