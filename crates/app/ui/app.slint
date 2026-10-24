@@ -654,8 +654,10 @@ export component AppWindow inherits Window {
             return false;
         }
         // Android Back: close the topmost layer, then leave a narrow-mode
-        // definition for the result list, then history back. Reject when nothing
-        // is left, so Android's default finishes the activity.
+        // definition for the result list (only when there is one — with no
+        // search, e.g. on the word of the moment, that pane would be blank), then
+        // history back. Reject when nothing is left, so Android's default
+        // finishes the activity.
         if (text == Key.Back) {
             if (root.show-conjugation) {
                 root.show-conjugation = false;
@@ -665,7 +667,7 @@ export component AppWindow inherits Window {
                 root.close-settings();
                 return true;
             }
-            if (root.narrow && root.narrow-def) {
+            if (root.narrow && root.narrow-def && root.searching) {
                 root.narrow-def = false;
                 return true;
             }
@@ -1011,6 +1013,17 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                }
+
+                // A search with no hits: the "No results" page lives in the
+                // definition pane, which narrow mode hides behind the list.
+                if root.narrow && root.searching && root.results.length == 0 : Text {
+                    y: 24px;
+                    width: parent.width;
+                    horizontal-alignment: center;
+                    text: "No results";
+                    font-size: 14px;
+                    color: text-secondary;
                 }
 
                 // divider between list and definition

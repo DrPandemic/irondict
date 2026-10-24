@@ -6,6 +6,7 @@
 // moment) and search becomes live once the index is ready.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -60,10 +61,12 @@ struct RowData {
     headword: String,
 }
 
-/// The word of the moment shown this session: its headword and the source
-/// dictionary to scope the lookup to (`None` = any). Held in a cell so the
-/// cleared-search and scope-change handlers stay in sync on what to show.
-type SessionWotm = Rc<RefCell<Option<(String, Option<String>)>>>;
+/// The words of the moment shown this session, one per scope (keyed by the
+/// scope's dictionary name, `None` = "All"): each is a headword and the source
+/// dictionary to scope the lookup to. Every dictionary keeps its own word, so
+/// switching scopes away and back (or clearing the search) returns to the same
+/// word. Shared by the cleared-search, scope-change and load handlers.
+type SessionWotm = Rc<RefCell<HashMap<Option<String>, (String, Option<String>)>>>;
 
 // ---- threaded search/render pipeline ----
 //
@@ -589,12 +592,16 @@ pub fn run(
     let seed = random_seed();
     // The word shown this session. Seeded from the cached page so clearing the
     // search box returns to the same word; scope changes refresh it.
-    let session_wotm: SessionWotm = Rc::new(RefCell::new(None));
+    let session_wotm: SessionWotm = Rc::new(RefCell::new(HashMap::new()));
     match load_cached_wotm() {
         // The previous launch's pick: show it immediately, with no hint that the
-        // dictionaries are still loading.
+        // dictionaries are still loading. It was drawn for the last-used scope,
+        // which is the one this launch restores.
         Some(page) => {
-            *session_wotm.borrow_mut() = wotm_identity(&page);
+            if let Some(word) = wotm_identity(&page) {
+                let last = manager.borrow().preferences().last_scope.clone();
+                session_wotm.borrow_mut().insert(last, word);
+            }
             apply_page(&ui, &blocks_model, &page);
         }
         // First launch (or a cleared cache): nothing cached yet. Leave the pane
@@ -772,17 +779,12 @@ pub fn run(
                 results_model.set_vec(Vec::new());
                 rows.borrow_mut().clear();
                 ui.set_selected_index(-1);
-                // Return to the session's word of the moment (the one booted on),
-                // drawing one live only if the session hasn't picked one yet.
-                let cached = session_wotm.borrow().clone();
-                let (wotm, wotm_src) = match cached {
-                    Some(p) => p,
-                    None => {
-                        let p = word_of_the_moment(&manager, ui.get_scope(), seed);
-                        *session_wotm.borrow_mut() = Some(p.clone());
-                        p
-                    }
-                };
+                // No result list to show on a phone: stay on the definition pane.
+                ui.set_narrow_def(true);
+                // Return to this dictionary's word of the moment (the one booted
+                // on), drawing one live only if the session hasn't picked one yet.
+                let (wotm, wotm_src) =
+                    session_word(&session_wotm, &manager, ui.get_scope(), seed);
                 navigate(
                     &ui,
                     &manager,
@@ -901,9 +903,11 @@ pub fn run(
             gen.set(gen.get() + 1);
             let q = ui.get_query();
             if q.trim().is_empty() {
-                // The word of the moment follows the newly-selected dictionary.
-                let (wotm, wotm_src) = word_of_the_moment(&manager, idx, seed);
-                *session_wotm.borrow_mut() = Some((wotm.clone(), wotm_src.clone()));
+                // The word of the moment follows the newly-selected dictionary,
+                // each keeping its own for the session. With no query there is
+                // no result list, so show it on a phone too.
+                ui.set_narrow_def(true);
+                let (wotm, wotm_src) = session_word(&session_wotm, &manager, idx, seed);
                 navigate(
                     &ui,
                     &manager,
@@ -1586,9 +1590,9 @@ fn apply_loaded_manager(
         // the previous launch cached. Only draw one here if there was nothing to
         // show (first launch / cleared cache) and the user hasn't started typing.
         None => {
-            if session_wotm.borrow().is_none() && ui.get_query().trim().is_empty() {
-                let (wotm, wotm_src) = word_of_the_moment(manager, ui.get_scope(), seed);
-                *session_wotm.borrow_mut() = Some((wotm.clone(), wotm_src.clone()));
+            let key = scope_filter(ui.get_scope(), manager);
+            if !session_wotm.borrow().contains_key(&key) && ui.get_query().trim().is_empty() {
+                let (wotm, wotm_src) = session_word(session_wotm, manager, ui.get_scope(), seed);
                 navigate(
                     ui,
                     manager,
@@ -1843,6 +1847,23 @@ fn word_of_the_moment(
             .map(|w| (w, Some(d.name().to_string())))
     })
     .unwrap_or_else(|| ("IronDict".to_string(), None))
+}
+
+/// This session's word of the moment for `scope`, drawing (and remembering) one
+/// the first time that dictionary is shown.
+fn session_word(
+    session: &SessionWotm,
+    manager: &Rc<RefCell<DictionaryManager>>,
+    scope: i32,
+    seed: usize,
+) -> (String, Option<String>) {
+    let key = scope_filter(scope, manager);
+    if let Some(word) = session.borrow().get(&key) {
+        return word.clone();
+    }
+    let word = word_of_the_moment(manager, scope, seed);
+    session.borrow_mut().insert(key, word.clone());
+    word
 }
 
 /// Like [`word_of_the_moment`] but takes `&DictionaryManager` so it can be
